@@ -2,7 +2,7 @@
 
 The `birria_wifi` decoder can export software-derived SISO channel state information from the legacy long training field of each detected 20 MHz OFDM packet. The exporter writes 52 active complex subcarriers with packet timing, PHY and MAC metadata.
 
-This guide covers CSI collection, record formats, validity, interpretation, calibration limits and verification. The [main Wi-Fi decoder guide](README_wifi.md) covers building the program, UDP input, frame decoding and general troubleshooting.
+This guide covers CSI collection, record formats, validity, interpretation, calibration limits and verification. The [CSI principle guide](README_wifi_csi_principle.md) explains why the estimate is available from raw I/Q and how packet detection, carrier correction, the L-LTF and FCS establish confidence. The [main Wi-Fi decoder guide](README_wifi.md) covers building the program, UDP input, frame decoding and general troubleshooting.
 
 > [!IMPORTANT]
 >

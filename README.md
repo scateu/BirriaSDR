@@ -108,7 +108,7 @@ when the dongle is the only USB device connected.
 
 ## Build and try
 
-You need a C compiler, CMake and the libusb development files. On Debian or
+You need C and C++ compilers, CMake and the libusb development files. On Debian or
 Ubuntu, install them with
 `sudo apt install build-essential cmake pkg-config libusb-1.0-0-dev`.
 On macOS with Homebrew, run `brew install cmake pkg-config libusb`.

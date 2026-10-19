@@ -1,6 +1,6 @@
 # BirriaSDR command line examples
 
-The example programs exercise `libbirriasdr` without adding a graphical interface or a device specific plugin. The [recorder](birria_rx.c) writes a finite or continuous CS16 file. The [UDP sender](birria_udp.c) sends the same samples to the Network source in SDR++.
+The example programs exercise `libbirriasdr` without adding a graphical interface or a device specific plugin. The [recorder](birria_rx.c) writes a finite or continuous CS16 file. The [UDP sender](birria_udp.c) sends the same samples to the Network source in SDR++. The [Wi-Fi decoder](birria_wifi.cpp) receives that UDP stream and decodes valid legacy OFDM MAC frames.
 
 ## Build the examples
 
@@ -11,7 +11,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-The build creates `build/birria_rx` and `build/birria_udp`. Run the device list before starting a capture:
+The build creates `build/birria_rx`, `build/birria_udp` and `build/birria_wifi`. Run the device list before starting a capture:
 
 ```sh
 ./build/birria_rx --list
@@ -132,6 +132,10 @@ Stop the sender with Ctrl-C and restart it with another frequency when you need 
 ```
 
 The library supports live hardware tuning, but this raw UDP example has no return control channel or interactive command interface. A native SDR++ source module or a separate control protocol would be required for direct tuning and gain control from the SDR++ interface.
+
+## Decode legacy Wi-Fi frames
+
+The `birria_wifi` example receives the raw UDP stream or a recorder file, decodes valid legacy 20 MHz OFDM frames and prints MAC addresses and beacon information. The decoder is standalone and uses no external DSP library. See the [complete Wi-Fi decoder guide](README_wifi.md) for setup, output fields, the signal-processing pipeline, supported rates, limitations and troubleshooting.
 
 ## Recovery, loss and shutdown
 

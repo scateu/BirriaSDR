@@ -74,6 +74,8 @@ The file must contain interleaved signed 16-bit I and Q components at 40 MSps co
 
 The file path replaces UDP input. The bind address and port have no effect when `--file` is present.
 
+Do not use the same path for `--file` and `--csi`. The decoder rejects an exact path match to prevent an output file from replacing its own input.
+
 ## Command line options
 
 Run the help command for the current option summary:
@@ -88,8 +90,12 @@ Run the help command for the current option summary:
 | `--port PORT` | `1234` | Selects the local UDP port from 1 to 65,535 |
 | `--file PATH` | Disabled | Reads a continuous little-endian CS16 file instead of UDP |
 | `--frequency HZ` | Not shown | Adds a center-frequency label to decoded frame output |
+| `--csi PATH` | Disabled | Writes versioned CSI records, and `-` selects standard output |
+| `--csi-format FORMAT` | `binary` | Selects `binary` or `jsonl`, and requires `--csi` |
+| `--csi-invalid` | Disabled | Includes SIGNAL-valid candidates whose MAC FCS failed |
+| `--csi-normalize` | Disabled | Adds a second CSI vector with unit root mean square magnitude |
 | `--verbose` | Disabled | Prints rejected PSDU diagnostics, including FCS mismatches, to standard error |
-| `--self-test` | Disabled | Tests convolutional decoding, CRC32 and basic MAC parsing without input samples |
+| `--self-test` | Disabled | Tests convolutional decoding, CSI estimation and serialization, CRC32 and basic MAC parsing without input samples |
 | `--help` | Not applicable | Prints the option summary and exits |
 
 The decoder writes valid frame records to standard output. Startup information, rejection diagnostics and final counters go to standard error. This separation lets another program consume valid records without parsing status messages.
@@ -136,6 +142,10 @@ The decoder extracts these values:
 - The capability value is printed as a hexadecimal word without interpreting individual flags.
 
 Malformed or truncated information elements stop element parsing for that frame, but the frame summary still prints when its FCS is valid.
+
+## Export channel state information
+
+The decoder can export 52 active legacy OFDM subcarriers as raw complex CSI, with optional normalization and binary or JSON Lines output. Packets with a valid FCS are exported by default, and an explicit option can retain SIGNAL-valid candidates whose FCS failed. See the [complete CSI export guide](README_wifi_csi.md) for live and recorded collection, record layouts, parsing, validity, calibration guidance, limitations and verification.
 
 ## Input and transport contract
 
@@ -211,7 +221,7 @@ A missing beacon is therefore not evidence that an access point is absent. The b
 
 ## Performance and validation
 
-The self-test covers the constraint-length-seven convolutional decoder, the standard CRC32 check value and basic control-frame address parsing. CTest runs it as `wifi_decoder_self_test`:
+The self-test covers the constraint-length-seven convolutional decoder, a synthetic complex channel with known amplitude and phase, carrier-offset correction, CSI normalization, binary CSI serialization, the standard CRC32 check value and basic control-frame address parsing. CTest runs it as `wifi_decoder_self_test`:
 
 ```sh
 ctest --test-dir build -R wifi_decoder_self_test --output-on-failure

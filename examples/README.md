@@ -135,7 +135,7 @@ The library supports live hardware tuning, but this raw UDP example has no retur
 
 ## Decode legacy Wi-Fi frames
 
-The `birria_wifi` example receives the raw UDP stream or a recorder file, decodes valid legacy 20 MHz OFDM frames and prints MAC addresses and beacon information. The decoder is standalone and uses no external DSP library. See the [complete Wi-Fi decoder guide](README_wifi.md) for setup, output fields, the signal-processing pipeline, supported rates, limitations and troubleshooting.
+The `birria_wifi` example receives the raw UDP stream or a recorder file, decodes valid legacy 20 MHz OFDM frames and prints MAC addresses and beacon information. It can also export 52-subcarrier complex CSI as binary records or JSON Lines. The decoder is standalone and uses no external DSP library. See the [complete Wi-Fi decoder guide](README_wifi.md) for setup, CSI formats, output fields, the signal-processing pipeline, supported rates, limitations and troubleshooting.
 
 ## Recovery, loss and shutdown
 

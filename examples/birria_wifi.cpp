@@ -42,8 +42,12 @@ struct Options {
     std::string bind = "0.0.0.0";
     std::string port = "1234";
     std::string file;
+    std::string csi_file;
+    std::string csi_format = "binary";
     uint64_t center_frequency = 0;
     bool verbose = false;
+    bool csi_invalid = false;
+    bool csi_normalize = false;
     bool self_test = false;
 };
 
@@ -70,6 +74,18 @@ const std::array<Rate, 8> rates{{
 const std::array<int, 4> pilot_bins{{-21, -7, 7, 21}};
 const std::array<float, 4> pilot_base{{1.0f, 1.0f, 1.0f, -1.0f}};
 
+std::array<int8_t, 52> csi_subcarriers()
+{
+    std::array<int8_t, 52> subcarriers{};
+    size_t output = 0;
+    for (int subcarrier = -26; subcarrier <= 26; ++subcarrier)
+        if (subcarrier != 0)
+            subcarriers[output++] = static_cast<int8_t>(subcarrier);
+    return subcarriers;
+}
+
+const std::array<int8_t, 52> csi_bins = csi_subcarriers();
+
 inline float magnitude_squared(const std::complex<float> &value)
 {
     return value.real() * value.real() + value.imag() * value.imag();
@@ -90,8 +106,12 @@ void usage(const char *program)
         << "  --port PORT             UDP local port (default 1234)\n"
         << "  --file PATH             Read little-endian CS16 instead of UDP\n"
         << "  --frequency HZ          Center frequency shown in output\n"
+        << "  --csi PATH              Write CSI records, or - for standard output\n"
+        << "  --csi-format FORMAT     binary or jsonl (default binary)\n"
+        << "  --csi-invalid           Include SIGNAL-valid frames with failed FCS\n"
+        << "  --csi-normalize         Include an RMS-normalized CSI vector\n"
         << "  --verbose               Print rejected PSDU diagnostics\n"
-        << "  --self-test             Test coding, CRC and MAC parsing\n"
+        << "  --self-test             Test coding, CSI, CRC and MAC parsing\n"
         << "  --help                  Show this help\n";
 }
 
@@ -120,6 +140,10 @@ bool parse_options(int argc, char **argv, Options &options)
             std::exit(0);
         } else if (option == "--verbose") {
             options.verbose = true;
+        } else if (option == "--csi-invalid") {
+            options.csi_invalid = true;
+        } else if (option == "--csi-normalize") {
+            options.csi_normalize = true;
         } else if (option == "--self-test") {
             options.self_test = true;
         } else if (option == "--bind") {
@@ -138,6 +162,16 @@ bool parse_options(int argc, char **argv, Options &options)
             if (!arg)
                 return false;
             options.file = arg;
+        } else if (option == "--csi") {
+            const char *arg = value();
+            if (!arg)
+                return false;
+            options.csi_file = arg;
+        } else if (option == "--csi-format") {
+            const char *arg = value();
+            if (!arg || (std::strcmp(arg, "binary") && std::strcmp(arg, "jsonl")))
+                return false;
+            options.csi_format = arg;
         } else if (option == "--frequency") {
             const char *arg = value();
             if (!arg || !parse_u64(arg, UINT64_MAX, false, options.center_frequency))
@@ -146,6 +180,11 @@ bool parse_options(int argc, char **argv, Options &options)
             return false;
         }
     }
+    if (options.csi_file.empty()
+        && (options.csi_invalid || options.csi_normalize || options.csi_format != "binary"))
+        return false;
+    if (!options.file.empty() && options.file == options.csi_file)
+        return false;
     return true;
 }
 
@@ -443,10 +482,286 @@ FrameInfo parse_frame(const std::vector<uint8_t> &frame)
     return info;
 }
 
+struct CsiRecord {
+    uint64_t input_sample = 0;
+    uint64_t center_frequency = 0;
+    float cfo_hz = 0;
+    float ltf_correlation = 0;
+    unsigned rate_mbps = 0;
+    unsigned psdu_length = 0;
+    bool fcs_valid = false;
+    bool mac_valid = false;
+    FrameInfo frame;
+    std::array<std::complex<float>, 52> channel{};
+};
+
+void append_u16(std::vector<uint8_t> &output, uint16_t value)
+{
+    output.push_back(static_cast<uint8_t>(value));
+    output.push_back(static_cast<uint8_t>(value >> 8));
+}
+
+void append_u32(std::vector<uint8_t> &output, uint32_t value)
+{
+    for (unsigned byte = 0; byte < 4; ++byte)
+        output.push_back(static_cast<uint8_t>(value >> (8 * byte)));
+}
+
+void append_u64(std::vector<uint8_t> &output, uint64_t value)
+{
+    for (unsigned byte = 0; byte < 8; ++byte)
+        output.push_back(static_cast<uint8_t>(value >> (8 * byte)));
+}
+
+void append_f32(std::vector<uint8_t> &output, float value)
+{
+    uint32_t word;
+    static_assert(sizeof(word) == sizeof(value), "float32 is required");
+    static_assert(std::numeric_limits<float>::is_iec559, "IEEE 754 float32 is required");
+    std::memcpy(&word, &value, sizeof(word));
+    append_u32(output, word);
+}
+
+std::array<uint8_t, 6> mac_bytes(const std::string &text)
+{
+    std::array<uint8_t, 6> output{};
+    if (text.size() != 17)
+        return output;
+    for (size_t i = 0; i < output.size(); ++i) {
+        char *end = nullptr;
+        std::string part = text.substr(i * 3, 2);
+        unsigned long value = std::strtoul(part.c_str(), &end, 16);
+        if (!end || *end || value > 255)
+            return {};
+        output[i] = static_cast<uint8_t>(value);
+    }
+    return output;
+}
+
+std::array<std::complex<float>, 52> normalize_csi(
+    const std::array<std::complex<float>, 52> &channel)
+{
+    double power = 0;
+    for (const auto &value : channel)
+        power += magnitude_squared(value);
+    float rms = static_cast<float>(std::sqrt(power / channel.size()));
+    std::array<std::complex<float>, 52> output{};
+    if (rms > 1.0e-20f)
+        for (size_t i = 0; i < output.size(); ++i)
+            output[i] = channel[i] / rms;
+    return output;
+}
+
+std::vector<uint8_t> encode_binary_csi(const CsiRecord &record, uint64_t sequence,
+                                       bool include_normalized)
+{
+    constexpr uint16_t version = 1;
+    constexpr uint16_t header_bytes = 96;
+    constexpr uint32_t vector_bytes = 52 * 2 * sizeof(float);
+    uint32_t record_bytes = header_bytes + vector_bytes
+        + (include_normalized ? vector_bytes : 0);
+    uint32_t flags = UINT32_C(1) << 2;
+    if (record.fcs_valid)
+        flags |= UINT32_C(1);
+    if (include_normalized)
+        flags |= UINT32_C(1) << 1;
+    if (record.mac_valid)
+        flags |= UINT32_C(1) << 3;
+    std::vector<uint8_t> output;
+    output.reserve(record_bytes);
+    output.insert(output.end(), {'B', 'C', 'S', 'I'});
+    append_u16(output, version);
+    append_u16(output, header_bytes);
+    append_u32(output, record_bytes);
+    append_u32(output, flags);
+    append_u64(output, sequence);
+    append_u64(output, record.input_sample);
+    append_u64(output, record.center_frequency);
+    append_f32(output, record.cfo_hz);
+    append_f32(output, record.ltf_correlation);
+    append_f32(output, 0.0f);
+    append_u16(output, static_cast<uint16_t>(record.rate_mbps));
+    append_u16(output, static_cast<uint16_t>(record.psdu_length));
+    output.push_back(static_cast<uint8_t>(record.frame.type));
+    output.push_back(static_cast<uint8_t>(record.frame.subtype));
+    output.push_back(record.fcs_valid ? 1 : 0);
+    output.push_back(52);
+    auto destination = mac_bytes(record.frame.destination);
+    auto source = mac_bytes(record.frame.source);
+    auto bssid = mac_bytes(record.frame.bssid);
+    output.insert(output.end(), destination.begin(), destination.end());
+    output.insert(output.end(), source.begin(), source.end());
+    output.insert(output.end(), bssid.begin(), bssid.end());
+    output.insert(output.end(), 18, 0);
+    if (output.size() != header_bytes)
+        return {};
+    for (const auto &value : record.channel) {
+        append_f32(output, value.real());
+        append_f32(output, value.imag());
+    }
+    if (include_normalized) {
+        auto normalized = normalize_csi(record.channel);
+        for (const auto &value : normalized) {
+            append_f32(output, value.real());
+            append_f32(output, value.imag());
+        }
+    }
+    return output.size() == record_bytes ? output : std::vector<uint8_t>{};
+}
+
+class CsiWriter {
+public:
+    ~CsiWriter()
+    {
+        if (file_ && file_ != stdout)
+            std::fclose(file_);
+    }
+
+    bool open(const Options &options)
+    {
+        if (options.csi_file.empty())
+            return true;
+        json_ = options.csi_format == "jsonl";
+        include_invalid_ = options.csi_invalid;
+        normalize_ = options.csi_normalize;
+        stdout_ = options.csi_file == "-";
+        file_ = stdout_ ? stdout : std::fopen(options.csi_file.c_str(), "wb");
+        if (!file_) {
+            std::perror("CSI output");
+            return false;
+        }
+        return true;
+    }
+
+    bool enabled() const { return file_ != nullptr; }
+    bool include_invalid() const { return include_invalid_; }
+    bool uses_stdout() const { return stdout_; }
+    bool failed() const { return failed_; }
+    uint64_t records() const { return sequence_; }
+
+    bool write(const CsiRecord &record)
+    {
+        if (!file_)
+            return true;
+        bool success = json_ ? write_json(record) : write_binary(record);
+        if (!success) {
+            failed_ = true;
+            if (!errno)
+                errno = EIO;
+            std::perror("CSI output");
+        }
+        return success;
+    }
+
+private:
+    bool write_binary(const CsiRecord &record)
+    {
+        auto output = encode_binary_csi(record, sequence_++, normalize_);
+        return !output.empty()
+            && std::fwrite(output.data(), 1, output.size(), file_) == output.size()
+            && std::fflush(file_) == 0;
+    }
+
+    static void json_string(std::ostringstream &output, const std::string &value)
+    {
+        output << '"';
+        for (unsigned char character : value) {
+            if (character == '\\' || character == '"')
+                output << '\\' << static_cast<char>(character);
+            else if (character >= 32 && character < 127)
+                output << static_cast<char>(character);
+            else
+                output << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                       << static_cast<unsigned>(character) << std::dec << std::setfill(' ');
+        }
+        output << '"';
+    }
+
+    bool write_json(const CsiRecord &record)
+    {
+        std::ostringstream output;
+        output << std::setprecision(9)
+               << "{\"version\":1,\"sequence\":" << sequence_++
+               << ",\"input_sample\":" << record.input_sample
+               << ",\"center_frequency_hz\":" << record.center_frequency
+               << ",\"cfo_hz\":" << record.cfo_hz
+               << ",\"ltf_correlation\":" << record.ltf_correlation
+               << ",\"rate_mbps\":" << record.rate_mbps
+               << ",\"psdu_length\":" << record.psdu_length
+               << ",\"fcs_valid\":" << (record.fcs_valid ? "true" : "false")
+               << ",\"mac_valid\":" << (record.mac_valid ? "true" : "false")
+               << ",\"type\":";
+        if (record.mac_valid)
+            output << record.frame.type << ",\"subtype\":" << record.frame.subtype;
+        else
+            output << "null,\"subtype\":null";
+        auto named = [&](const char *name, const std::string &value) {
+            output << ",\"" << name << "\":";
+            if (value.empty())
+                output << "null";
+            else
+                json_string(output, value);
+        };
+        named("destination", record.frame.destination);
+        named("source", record.frame.source);
+        named("bssid", record.frame.bssid);
+        output << ",\"subcarriers\":[";
+        for (size_t i = 0; i < csi_bins.size(); ++i) {
+            if (i)
+                output << ',';
+            output << static_cast<int>(csi_bins[i]);
+        }
+        auto vector = [&](const char *name,
+                          const std::array<std::complex<float>, 52> &channel) {
+            output << "],\"" << name << "\":[";
+            for (size_t i = 0; i < channel.size(); ++i) {
+                if (i)
+                    output << ',';
+                output << '[' << channel[i].real() << ',' << channel[i].imag() << ']';
+            }
+        };
+        vector("csi", record.channel);
+        if (normalize_)
+            vector("csi_normalized", normalize_csi(record.channel));
+        output << "]}\n";
+        std::string text = output.str();
+        return std::fwrite(text.data(), 1, text.size(), file_) == text.size()
+            && std::fflush(file_) == 0;
+    }
+
+    FILE *file_ = nullptr;
+    bool json_ = false;
+    bool include_invalid_ = false;
+    bool normalize_ = false;
+    bool stdout_ = false;
+    bool failed_ = false;
+    uint64_t sequence_ = 0;
+};
+
+std::array<std::complex<float>, FFT_SIZE> estimate_channel(
+    const std::array<std::complex<float>, FFT_SIZE> &first,
+    const std::array<std::complex<float>, FFT_SIZE> &second)
+{
+    std::array<std::complex<float>, FFT_SIZE> channel{};
+    for (size_t bin = 0; bin < FFT_SIZE; ++bin)
+        if (magnitude_squared(ltf_frequency[bin]) > 0)
+            channel[bin] = (first[bin] + second[bin]) / (2.0f * ltf_frequency[bin]);
+    return channel;
+}
+
+std::array<std::complex<float>, 52> active_csi(
+    const std::array<std::complex<float>, FFT_SIZE> &channel)
+{
+    std::array<std::complex<float>, 52> output{};
+    for (size_t i = 0; i < csi_bins.size(); ++i)
+        output[i] = channel[bin_index(csi_bins[i])];
+    return output;
+}
+
 class Decoder {
 public:
-    Decoder(uint64_t center_frequency, bool verbose)
-        : center_frequency_(center_frequency), verbose_(verbose)
+    Decoder(uint64_t center_frequency, bool verbose, CsiWriter *csi)
+        : center_frequency_(center_frequency), verbose_(verbose), csi_(csi)
     {
         for (int subcarrier = -26; subcarrier <= 26; ++subcarrier)
             if (subcarrier != 0 && std::find(pilot_bins.begin(), pilot_bins.end(), subcarrier)
@@ -670,35 +985,36 @@ private:
         FrameInfo info = parse_frame(frame);
         double time = static_cast<double>(sample_index * 2) / INPUT_RATE;
         double cfo = omega * WIFI_RATE / (2.0 * PI);
-        std::cout << std::fixed << std::setprecision(6)
-                  << "frame time=" << time << "s sample=" << sample_index * 2;
+        std::ostream &output = csi_ && csi_->uses_stdout() ? std::cerr : std::cout;
+        output << std::fixed << std::setprecision(6)
+               << "frame time=" << time << "s sample=" << sample_index * 2;
         if (center_frequency_)
-            std::cout << " center=" << center_frequency_ << "Hz";
-        std::cout << " rate=" << rate.mbps << "Mbps length=" << frame.size()
-                  << " type=" << type_name(info.type)
-                  << " subtype=" << subtype_name(info.type, info.subtype)
-                  << " dst=" << info.destination;
+            output << " center=" << center_frequency_ << "Hz";
+        output << " rate=" << rate.mbps << "Mbps length=" << frame.size()
+               << " type=" << type_name(info.type)
+               << " subtype=" << subtype_name(info.type, info.subtype)
+               << " dst=" << info.destination;
         if (!info.source.empty())
-            std::cout << " src=" << info.source;
+            output << " src=" << info.source;
         if (!info.bssid.empty())
-            std::cout << " bssid=" << info.bssid;
-        std::cout << " cfo=" << std::setprecision(1) << cfo << "Hz fcs=ok\n";
+            output << " bssid=" << info.bssid;
+        output << " cfo=" << std::setprecision(1) << cfo << "Hz fcs=ok\n";
         if (info.type == 0 && (info.subtype == 8 || info.subtype == 5)) {
-            std::cout << (info.subtype == 8 ? "beacon" : "probe-response")
-                      << " bssid=" << info.bssid << " ssid="
-                      << (info.ssid.empty() ? "<hidden>" : info.ssid);
+            output << (info.subtype == 8 ? "beacon" : "probe-response")
+                   << " bssid=" << info.bssid << " ssid="
+                   << (info.ssid.empty() ? "<hidden>" : info.ssid);
             if (info.channel >= 0)
-                std::cout << " channel=" << info.channel;
+                output << " channel=" << info.channel;
             if (frame.size() >= 36) {
                 double interval_ms = get_le16(frame.data() + 32) * 1.024;
-                std::cout << " interval=" << std::fixed << std::setprecision(3)
-                          << interval_ms << "ms capability=0x" << std::hex
-                          << std::setw(4) << std::setfill('0') << get_le16(frame.data() + 34)
-                          << std::dec << std::setfill(' ');
+                output << " interval=" << std::fixed << std::setprecision(3)
+                       << interval_ms << "ms capability=0x" << std::hex
+                       << std::setw(4) << std::setfill('0') << get_le16(frame.data() + 34)
+                       << std::dec << std::setfill(' ');
             }
-            std::cout << '\n';
+            output << '\n';
         }
-        std::cout.flush();
+        output.flush();
     }
 
     DecodeResult decode_candidate(size_t run_start, std::complex<float> correlation)
@@ -730,10 +1046,7 @@ private:
         float omega = coarse_omega + std::arg(repeated) / 64.0f;
         auto first = symbol_fft(ltf_start, ltf_start, omega);
         auto second = symbol_fft(ltf_start + 64, ltf_start, omega);
-        std::array<std::complex<float>, FFT_SIZE> channel{};
-        for (size_t bin = 0; bin < FFT_SIZE; ++bin)
-            if (magnitude_squared(ltf_frequency[bin]) > 0)
-                channel[bin] = (first[bin] + second[bin]) / (2.0f * ltf_frequency[bin]);
+        auto channel = estimate_channel(first, second);
         size_t length = 0;
         float phase = 0;
         const Rate *rate = decode_signal(ltf_start + 144, channel, ltf_start, omega, length, phase);
@@ -775,7 +1088,26 @@ private:
                 frame[byte] |= static_cast<uint8_t>(plain[16 + 8 * byte + bit] << bit);
         uint32_t expected_fcs = get_le32(frame.data() + frame.size() - 4);
         uint32_t actual_fcs = crc32(frame.data(), frame.size() - 4);
-        if (expected_fcs == actual_fcs) {
+        bool fcs_valid = expected_fcs == actual_fcs;
+        FrameInfo frame_info;
+        if (fcs_valid)
+            frame_info = parse_frame(frame);
+        if (csi_ && csi_->enabled() && (fcs_valid || csi_->include_invalid())) {
+            CsiRecord record;
+            record.input_sample = (stream_base_ + ltf_start) * 2;
+            record.center_frequency = center_frequency_;
+            record.cfo_hz = omega * static_cast<float>(WIFI_RATE / (2.0 * PI));
+            record.ltf_correlation = best_score;
+            record.rate_mbps = rate->mbps;
+            record.psdu_length = static_cast<unsigned>(length);
+            record.fcs_valid = fcs_valid;
+            record.mac_valid = fcs_valid;
+            record.frame = frame_info;
+            record.channel = active_csi(channel);
+            if (!csi_->write(record))
+                interrupted = true;
+        }
+        if (fcs_valid) {
             ++frames_;
             print_frame(frame, *rate, stream_base_ + ltf_start, omega);
         } else {
@@ -853,6 +1185,7 @@ private:
 
     uint64_t center_frequency_;
     bool verbose_;
+    CsiWriter *csi_;
     std::vector<int> data_bins_;
     std::vector<std::complex<float>> samples_;
     std::complex<float> pending_{};
@@ -958,6 +1291,77 @@ bool coding_self_test()
     return passed;
 }
 
+bool csi_self_test()
+{
+    std::array<std::complex<float>, FFT_SIZE> expected{};
+    std::array<std::complex<float>, FFT_SIZE> transmitted{};
+    for (int subcarrier = -26; subcarrier <= 26; ++subcarrier) {
+        if (subcarrier == 0)
+            continue;
+        int bin = bin_index(subcarrier);
+        float amplitude = 0.75f + 0.01f * static_cast<float>(subcarrier + 26);
+        float phase = 0.025f * static_cast<float>(subcarrier);
+        expected[bin] = std::polar(amplitude, phase);
+        transmitted[bin] = ltf_frequency[bin] * expected[bin];
+    }
+    auto time = transmitted;
+    fft64(time, true);
+    constexpr float omega = 0.0075f;
+    std::array<std::complex<float>, FFT_SIZE> first{};
+    std::array<std::complex<float>, FFT_SIZE> second{};
+    for (size_t i = 0; i < FFT_SIZE; ++i) {
+        std::complex<float> first_received = time[i] * std::polar(1.0f, omega * i);
+        std::complex<float> second_received = time[i]
+            * std::polar(1.0f, omega * static_cast<float>(i + FFT_SIZE));
+        first[i] = first_received * std::polar(1.0f, -omega * i);
+        second[i] = second_received
+            * std::polar(1.0f, -omega * static_cast<float>(i + FFT_SIZE));
+    }
+    fft64(first);
+    fft64(second);
+    auto estimated = estimate_channel(first, second);
+    for (int subcarrier = -26; subcarrier <= 26; ++subcarrier) {
+        if (subcarrier == 0)
+            continue;
+        int bin = bin_index(subcarrier);
+        if (std::abs(estimated[bin] - expected[bin]) > 2.0e-4f) {
+            std::cerr << "self-test: CSI estimate mismatch at subcarrier "
+                      << subcarrier << '\n';
+            return false;
+        }
+    }
+    auto normalized = normalize_csi(active_csi(estimated));
+    double power = 0;
+    for (const auto &value : normalized)
+        power += magnitude_squared(value);
+    if (std::abs(power / normalized.size() - 1.0) > 1.0e-5) {
+        std::cerr << "self-test: CSI normalization mismatch\n";
+        return false;
+    }
+    CsiRecord record;
+    record.input_sample = UINT64_C(0x0102030405060708);
+    record.center_frequency = UINT64_C(2437000000);
+    record.cfo_hz = -1234.5f;
+    record.ltf_correlation = 0.75f;
+    record.rate_mbps = 24;
+    record.psdu_length = 128;
+    record.fcs_valid = true;
+    record.mac_valid = true;
+    record.frame.type = 1;
+    record.frame.subtype = 13;
+    record.frame.destination = "dd:0e:e0:3e:44:08";
+    record.channel = active_csi(estimated);
+    auto binary = encode_binary_csi(record, 7, true);
+    if (binary.size() != 928 || std::memcmp(binary.data(), "BCSI", 4)
+        || get_le16(binary.data() + 4) != 1 || get_le16(binary.data() + 6) != 96
+        || get_le32(binary.data() + 8) != binary.size()
+        || get_le32(binary.data() + 12) != 15 || binary[59] != 52) {
+        std::cerr << "self-test: CSI binary serialization mismatch\n";
+        return false;
+    }
+    return true;
+}
+
 void handle_signal(int)
 {
     interrupted = true;
@@ -973,11 +1377,14 @@ int main(int argc, char **argv)
         return 2;
     }
     if (options.self_test) {
-        bool passed = coding_self_test();
+        bool passed = coding_self_test() && csi_self_test();
         std::cout << (passed ? "Wi-Fi decoder self-test passed\n" : "Wi-Fi decoder self-test failed\n");
         return passed ? 0 : 1;
     }
-    Decoder decoder(options.center_frequency, options.verbose);
+    CsiWriter csi;
+    if (!csi.open(options))
+        return 1;
+    Decoder decoder(options.center_frequency, options.verbose, &csi);
     ::signal(SIGINT, handle_signal);
     ::signal(SIGTERM, handle_signal);
     std::array<uint8_t, 65536> buffer{};
@@ -1019,6 +1426,7 @@ int main(int argc, char **argv)
               << ", SIGNAL headers=" << decoder.signal_headers()
               << ", valid frames=" << decoder.frames()
               << ", FCS failures=" << decoder.fcs_failures()
-              << ", malformed datagrams=" << decoder.bad_datagrams() << '\n';
-    return 0;
+              << ", malformed datagrams=" << decoder.bad_datagrams()
+              << ", CSI records=" << csi.records() << '\n';
+    return csi.failed() ? 1 : 0;
 }

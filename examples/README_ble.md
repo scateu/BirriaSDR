@@ -198,7 +198,7 @@ principal device address as their key. Scan and connection requests use their
 address pair. Rows are sorted by descending count, with most recent activity as
 the tie breaker. The aligned columns are `LAST SEEN`, `COUNT`, `Center/MHz`,
 `Ch`, `PDU`, `RSSI/dBFS`, `Address` and `Details`. The table is limited to the
-terminal height and retains at most 2,048 unique rows.
+terminal height and retains at most 2,048 unique rows. The renderer updates at most twice per second, writes each frame as one terminal operation and keeps equal-count rows in stable insertion order to reduce flicker.
 
 The compact and interactive options are mutually exclusive. Interactive mode
 cannot be combined with rejected-packet diagnostics from `--verbose` and

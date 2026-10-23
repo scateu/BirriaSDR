@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <sys/ioctl.h>
 #include <thread>
@@ -33,7 +34,7 @@ public:
     Screen(std::string title, std::vector<Column> columns)
         : title_(std::move(title)), columns_(std::move(columns))
     {
-        std::fputs("\033[?1049h\033[?25l", stdout);
+        std::fputs("\033[?1049h\033[?25l\033[2J\033[H", stdout);
         std::fflush(stdout);
         worker_ = std::thread(&Screen::loop, this);
     }
@@ -71,6 +72,8 @@ public:
                     entries_.erase(oldest);
             }
             Entry &entry = entries_[key];
+            if (!entry.count)
+                entry.order = next_order_++;
             entry.values = std::move(values);
             entry.last = now;
             ++entry.count;
@@ -94,6 +97,7 @@ private:
         std::vector<std::string> values;
         Clock::time_point last{};
         uint64_t count = 0;
+        uint64_t order = 0;
     };
 
     static std::string age_text(Clock::duration age)
@@ -134,9 +138,9 @@ private:
         std::unique_lock<std::mutex> lock(wait_mutex_);
         while (!stop_.load()) {
             render();
-            condition_.wait_for(lock, std::chrono::milliseconds(250));
+            condition_.wait_for(lock, std::chrono::milliseconds(500),
+                                [this] { return stop_.load(); });
         }
-        render();
     }
 
     void render()
@@ -162,7 +166,7 @@ private:
         std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {
             if (a.count != b.count)
                 return a.count > b.count;
-            return a.last > b.last;
+            return a.order < b.order;
         });
 
         constexpr size_t age_width = 9;
@@ -199,8 +203,13 @@ private:
 
         auto now = Clock::now();
         size_t available_lines = lines > 5 ? lines - 5 : 1;
-        std::printf("\033[H\033[2J%s\n", title_.c_str());
-        std::printf("%s\n", status.empty() ? "Ctrl-C to stop" : status.c_str());
+        std::ostringstream frame;
+        auto line = [&](const std::string &text) {
+            frame << "\033[2K" << text << '\n';
+        };
+        frame << "\033[H";
+        line(title_);
+        line(status.empty() ? "Ctrl-C to stop" : status);
         std::string header = fit("LAST SEEN", age_width, false) + " "
             + fit("COUNT", count_width, true) + "  ";
         for (size_t i = 0; i < columns_.size(); ++i) {
@@ -208,27 +217,30 @@ private:
             if (i + 1 < columns_.size())
                 header += ' ';
         }
-        std::printf("%s\n", header.c_str());
+        line(header);
 
         size_t shown = std::min(available_lines, entries.size());
         for (size_t row = 0; row < shown; ++row) {
-            std::string line = fit(age_text(now - entries[row].last), age_width, false)
+            std::string text = fit(age_text(now - entries[row].last), age_width, false)
                 + " " + fit(std::to_string(entries[row].count), count_width, true) + "  ";
             for (size_t column = 0; column < columns_.size(); ++column) {
                 std::string value = column < entries[row].values.size()
                     ? entries[row].values[column] : std::string();
-                line += fit(std::move(value), widths[column], columns_[column].right);
+                text += fit(std::move(value), widths[column], columns_[column].right);
                 if (column + 1 < columns_.size())
-                    line += ' ';
+                    text += ' ';
             }
-            std::printf("%s\n", line.c_str());
+            line(text);
         }
         for (size_t i = shown; i < available_lines; ++i)
-            std::putchar('\n');
-        std::printf("%zu unique rows, sorted by count", entries.size());
+            line("");
+        std::ostringstream footer;
+        footer << entries.size() << " unique rows, sorted by count";
         if (entries.size() > shown)
-            std::printf(", %zu hidden by terminal height", entries.size() - shown);
-        std::printf("\n");
+            footer << ", " << entries.size() - shown << " hidden by terminal height";
+        line(footer.str());
+        std::string output = frame.str();
+        std::fwrite(output.data(), 1, output.size(), stdout);
         std::fflush(stdout);
     }
 
@@ -238,6 +250,7 @@ private:
     std::thread worker_;
     std::mutex mutex_;
     std::map<std::string, Entry> entries_;
+    uint64_t next_order_ = 0;
     std::string status_;
     std::mutex wait_mutex_;
     std::condition_variable condition_;

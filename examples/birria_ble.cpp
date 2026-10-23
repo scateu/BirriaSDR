@@ -842,6 +842,9 @@ private:
         if (compact_ || screen_) {
             std::ostringstream compact;
             std::string row_key = std::string(pdu_name(type)) + "|";
+            std::string primary_address;
+            CompactAdInfo ad_info;
+            bool have_ad_info = false;
             compact << std::fixed << std::setprecision(6)
                     << "ble time=" << static_cast<double>(packet_metrics.input_sample) / input_rate_
                     << "s sample=" << packet_metrics.input_sample
@@ -853,6 +856,7 @@ private:
                 std::string address = address_string(payload);
                 compact << " addr=" << address;
                 row_key = "device|" + address;
+                primary_address = address;
                 ad = payload + 6;
                 ad_length = length - 6;
             } else if (type == 1 && length >= 12) {
@@ -860,31 +864,35 @@ private:
                 std::string target = address_string(payload + 6);
                 compact << " addr=" << address << " target=" << target;
                 row_key += address + "|" + target;
+                primary_address = address;
             } else if (type == 3 && length >= 12) {
                 std::string scanner = address_string(payload);
                 std::string address = address_string(payload + 6);
                 compact << " scanner=" << scanner << " addr=" << address;
                 row_key += scanner + "|" + address;
+                primary_address = address;
             } else if (type == 5 && length >= 12) {
                 std::string initiator = address_string(payload);
                 std::string address = address_string(payload + 6);
                 compact << " initiator=" << initiator << " addr=" << address;
                 row_key += initiator + "|" + address;
+                primary_address = address;
             }
             if (ad) {
-                CompactAdInfo info = compact_ad_info(ad, ad_length);
-                if (!info.name.empty())
-                    compact << " name=" << info.name;
-                if (info.company >= 0)
+                ad_info = compact_ad_info(ad, ad_length);
+                have_ad_info = true;
+                if (!ad_info.name.empty())
+                    compact << " name=" << ad_info.name;
+                if (ad_info.company >= 0)
                     compact << " company=0x" << std::hex << std::setw(4)
-                            << std::setfill('0') << info.company << std::dec;
-                if (info.apple_type >= 0)
+                            << std::setfill('0') << ad_info.company << std::dec;
+                if (ad_info.apple_type >= 0)
                     compact << " apple=0x" << std::hex << std::setw(2)
-                            << info.apple_type << std::dec;
-                if (info.find_my)
+                            << ad_info.apple_type << std::dec;
+                if (ad_info.find_my)
                     compact << " find_my=1 status=0x" << std::hex << std::setw(2)
-                            << info.find_my_status << std::dec;
-                if (info.ibeacon)
+                            << ad_info.find_my_status << std::dec;
+                if (ad_info.ibeacon)
                     compact << " ibeacon=1";
             }
             compact << " rssi=" << std::setprecision(1) << packet_metrics.rssi_dbfs
@@ -892,7 +900,32 @@ private:
             if (screen_) {
                 if (row_key.back() == '|')
                     row_key += hex_bytes(payload, std::min<size_t>(length, 8));
-                screen_->update(row_key, compact.str());
+                std::ostringstream center;
+                center << std::fixed << std::setprecision(3)
+                       << static_cast<double>(channel_frequency(channel_)) / 1000000.0;
+                std::ostringstream rssi;
+                rssi << std::fixed << std::setprecision(1) << packet_metrics.rssi_dbfs;
+                std::ostringstream details;
+                details << "len=" << length;
+                if (have_ad_info && !ad_info.name.empty())
+                    details << " name=" << ad_info.name;
+                if (have_ad_info && ad_info.company >= 0)
+                    details << " company=0x" << std::hex << std::setw(4)
+                            << std::setfill('0') << ad_info.company << std::dec;
+                if (have_ad_info && ad_info.apple_type >= 0)
+                    details << " apple=0x" << std::hex << std::setw(2)
+                            << ad_info.apple_type << std::dec;
+                if (have_ad_info && ad_info.find_my)
+                    details << " find_my=1 status=0x" << std::hex << std::setw(2)
+                            << ad_info.find_my_status << std::dec;
+                if (have_ad_info && ad_info.ibeacon)
+                    details << " ibeacon=1";
+                details << " sample=" << packet_metrics.input_sample
+                        << " cfo=" << std::fixed << std::setprecision(0)
+                        << packet_metrics.cfo_hz << "Hz crc="
+                        << (crc_valid ? "ok" : "bad");
+                screen_->update(row_key, {center.str(), std::to_string(channel_),
+                    pdu_name(type), rssi.str(), primary_address, details.str()});
             } else if (!quiet_) {
                 std::cout << compact.str() << '\n';
                 std::cout.flush();
@@ -1565,7 +1598,12 @@ int main(int argc, char **argv)
             std::cerr << "Interactive mode requires a terminal on standard output.\n";
             return 2;
         }
-        screen = std::make_unique<birria_tui::Screen>("BirriaSDR BLE monitor");
+        screen = std::make_unique<birria_tui::Screen>("BirriaSDR BLE monitor",
+            std::vector<birria_tui::Column>{
+                {"Center/MHz", 10, true}, {"Ch", 3, true},
+                {"PDU", 17, false}, {"RSSI/dBFS", 10, true},
+                {"Address", 17, false}, {"Details", 0, false}
+            });
         screen->set_status("Starting capture. Ctrl-C to stop.");
     }
     auto show_status = [&](const std::string &message) {

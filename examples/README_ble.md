@@ -195,9 +195,10 @@ The interactive mode opens an ANSI terminal screen:
 
 The screen combines repeated packets into one row. Advertisements use the
 principal device address as their key. Scan and connection requests use their
-address pair. Each row shows a count, a continuously updated `LAST SEEN` age and
-the most recent compact details. Rows are ordered by recency, and the table is
-limited to the terminal height. The display retains at most 2,048 unique rows.
+address pair. Rows are sorted by descending count, with most recent activity as
+the tie breaker. The aligned columns are `LAST SEEN`, `COUNT`, `Center/MHz`,
+`Ch`, `PDU`, `RSSI/dBFS`, `Address` and `Details`. The table is limited to the
+terminal height and retains at most 2,048 unique rows.
 
 The compact and interactive options are mutually exclusive. Interactive mode
 cannot be combined with rejected-packet diagnostics from `--verbose` and

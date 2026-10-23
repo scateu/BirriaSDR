@@ -1199,7 +1199,30 @@ private:
                 else
                     key = std::string(subtype_name(info.type, info.subtype)) + "|"
                         + info.source + "|" + info.destination + "|" + info.bssid;
-                screen_->update(key, line.str());
+                std::ostringstream center;
+                center << std::fixed << std::setprecision(3)
+                       << static_cast<double>(center_frequency_) / 1000000.0;
+                std::ostringstream rssi;
+                rssi << std::fixed << std::setprecision(1) << metrics.rssi_dbfs;
+                std::ostringstream snr;
+                snr << std::fixed << std::setprecision(1) << metrics.snr_db;
+                std::string address = !info.bssid.empty() ? info.bssid
+                    : !info.source.empty() ? info.source : info.destination;
+                std::ostringstream details;
+                if (!info.ssid.empty())
+                    details << "ssid=" << info.ssid << ' ';
+                if (info.channel >= 0)
+                    details << "ch=" << info.channel << ' ';
+                details << "len=" << frame.size() << " sample=" << input_sample;
+                if (!info.source.empty() && info.source != address)
+                    details << " src=" << info.source;
+                if (!info.destination.empty() && info.destination != address)
+                    details << " dst=" << info.destination;
+                details << " cfo=" << std::fixed << std::setprecision(1) << cfo
+                        << "Hz ltf=" << std::setprecision(3) << ltf_score << " fcs=ok";
+                screen_->update(key, {center.str(), std::to_string(rate.mbps),
+                    subtype_name(info.type, info.subtype), rssi.str(), snr.str(),
+                    address, details.str()});
             } else {
                 output << line.str() << '\n';
                 output.flush();
@@ -1864,7 +1887,13 @@ int main(int argc, char **argv)
             std::cerr << "Interactive mode requires a terminal on standard output.\n";
             return 2;
         }
-        screen = std::make_unique<birria_tui::Screen>("BirriaSDR Wi-Fi monitor");
+        screen = std::make_unique<birria_tui::Screen>("BirriaSDR Wi-Fi monitor",
+            std::vector<birria_tui::Column>{
+                {"Center/MHz", 10, true}, {"Rate/Mbps", 9, true},
+                {"PDU", 14, false}, {"RSSI/dBFS", 10, true},
+                {"SNR/dB", 8, true}, {"Address", 17, false},
+                {"Details", 0, false}
+            });
         screen->set_status("Starting capture. Ctrl-C to stop.");
     }
     auto show_status = [&](const std::string &message) {

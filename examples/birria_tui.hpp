@@ -17,13 +17,21 @@
 #include <sys/ioctl.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace birria_tui {
 
+struct Column {
+    std::string heading;
+    size_t width;
+    bool right = false;
+};
+
 class Screen {
 public:
-    explicit Screen(std::string title) : title_(std::move(title))
+    Screen(std::string title, std::vector<Column> columns)
+        : title_(std::move(title)), columns_(std::move(columns))
     {
         std::fputs("\033[?1049h\033[?25l", stdout);
         std::fflush(stdout);
@@ -48,9 +56,10 @@ public:
         return isatty(STDOUT_FILENO) != 0;
     }
 
-    void update(const std::string &key, std::string summary)
+    void update(const std::string &key, std::vector<std::string> values)
     {
         auto now = Clock::now();
+        values.resize(columns_.size());
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (entries_.find(key) == entries_.end() && entries_.size() >= 2048) {
@@ -62,7 +71,7 @@ public:
                     entries_.erase(oldest);
             }
             Entry &entry = entries_[key];
-            entry.summary = std::move(summary);
+            entry.values = std::move(values);
             entry.last = now;
             ++entry.count;
         }
@@ -82,7 +91,7 @@ private:
     using Clock = std::chrono::steady_clock;
 
     struct Entry {
-        std::string summary;
+        std::vector<std::string> values;
         Clock::time_point last{};
         uint64_t count = 0;
     };
@@ -102,6 +111,24 @@ private:
         return text;
     }
 
+    static std::string fit(std::string text, size_t width, bool right)
+    {
+        if (text.size() > width) {
+            if (width > 3)
+                text = text.substr(0, width - 3) + "...";
+            else
+                text.resize(width);
+        }
+        if (text.size() < width) {
+            size_t padding = width - text.size();
+            if (right)
+                text.insert(0, padding, ' ');
+            else
+                text.append(padding, ' ');
+        }
+        return text;
+    }
+
     void loop()
     {
         std::unique_lock<std::mutex> lock(wait_mutex_);
@@ -115,11 +142,11 @@ private:
     void render()
     {
         struct winsize size{};
-        unsigned columns = 120;
+        unsigned terminal_columns = 120;
         unsigned lines = 30;
         if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0) {
             if (size.ws_col)
-                columns = size.ws_col;
+                terminal_columns = size.ws_col;
             if (size.ws_row)
                 lines = size.ws_row;
         }
@@ -133,31 +160,72 @@ private:
             status = status_;
         }
         std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {
+            if (a.count != b.count)
+                return a.count > b.count;
             return a.last > b.last;
         });
+
+        constexpr size_t age_width = 9;
+        constexpr size_t count_width = 8;
+        constexpr size_t prefix_width = age_width + 1 + count_width + 2;
+        size_t available_width = terminal_columns > prefix_width
+            ? terminal_columns - prefix_width : 1;
+        std::vector<size_t> widths(columns_.size());
+        size_t fixed_width = 0;
+        for (size_t i = 0; i < columns_.size(); ++i) {
+            widths[i] = columns_[i].width;
+            if (i + 1 < columns_.size())
+                fixed_width += widths[i] + 1;
+        }
+        if (!widths.empty()) {
+            size_t minimum_last = 8;
+            while (fixed_width + minimum_last > available_width) {
+                bool reduced = false;
+                for (size_t i = columns_.size() - 1; i-- > 0;) {
+                    if (widths[i] > 4) {
+                        --widths[i];
+                        --fixed_width;
+                        reduced = true;
+                        if (fixed_width + minimum_last <= available_width)
+                            break;
+                    }
+                }
+                if (!reduced)
+                    break;
+            }
+            widths.back() = available_width > fixed_width
+                ? available_width - fixed_width : 1;
+        }
+
         auto now = Clock::now();
-        size_t available = lines > 5 ? lines - 5 : 1;
+        size_t available_lines = lines > 5 ? lines - 5 : 1;
         std::printf("\033[H\033[2J%s\n", title_.c_str());
         std::printf("%s\n", status.empty() ? "Ctrl-C to stop" : status.c_str());
-        std::printf("%-10s %8s  %s\n", "LAST SEEN", "COUNT", "DETAILS");
-        size_t shown = std::min(available, entries.size());
-        for (size_t i = 0; i < shown; ++i) {
-            std::string age = age_text(now - entries[i].last);
-            size_t fixed = 22;
-            size_t width = columns > fixed ? columns - fixed : 1;
-            std::string summary = entries[i].summary;
-            if (summary.size() > width) {
-                if (width > 3)
-                    summary = summary.substr(0, width - 3) + "...";
-                else
-                    summary = summary.substr(0, width);
-            }
-            std::printf("%-10s %8llu  %s\n", age.c_str(),
-                static_cast<unsigned long long>(entries[i].count), summary.c_str());
+        std::string header = fit("LAST SEEN", age_width, false) + " "
+            + fit("COUNT", count_width, true) + "  ";
+        for (size_t i = 0; i < columns_.size(); ++i) {
+            header += fit(columns_[i].heading, widths[i], columns_[i].right);
+            if (i + 1 < columns_.size())
+                header += ' ';
         }
-        for (size_t i = shown; i < available; ++i)
+        std::printf("%s\n", header.c_str());
+
+        size_t shown = std::min(available_lines, entries.size());
+        for (size_t row = 0; row < shown; ++row) {
+            std::string line = fit(age_text(now - entries[row].last), age_width, false)
+                + " " + fit(std::to_string(entries[row].count), count_width, true) + "  ";
+            for (size_t column = 0; column < columns_.size(); ++column) {
+                std::string value = column < entries[row].values.size()
+                    ? entries[row].values[column] : std::string();
+                line += fit(std::move(value), widths[column], columns_[column].right);
+                if (column + 1 < columns_.size())
+                    line += ' ';
+            }
+            std::printf("%s\n", line.c_str());
+        }
+        for (size_t i = shown; i < available_lines; ++i)
             std::putchar('\n');
-        std::printf("%zu unique rows", entries.size());
+        std::printf("%zu unique rows, sorted by count", entries.size());
         if (entries.size() > shown)
             std::printf(", %zu hidden by terminal height", entries.size() - shown);
         std::printf("\n");
@@ -165,6 +233,7 @@ private:
     }
 
     std::string title_;
+    std::vector<Column> columns_;
     std::atomic<bool> stop_{false};
     std::thread worker_;
     std::mutex mutex_;

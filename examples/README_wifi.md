@@ -225,9 +225,10 @@ The interactive mode opens an ANSI terminal screen:
 
 The screen combines repeated frames into one row. Beacon and probe-response
 traffic is grouped by BSSID. Other traffic is grouped by subtype and available
-source, destination and BSSID addresses. Each row shows a count, a continuously
-updated `LAST SEEN` age and the most recent compact details. Rows are ordered by
-recency, and the table is limited to the terminal height. The display retains
+source, destination and BSSID addresses. Rows are sorted by descending count,
+with most recent activity as the tie breaker. The aligned columns are
+`LAST SEEN`, `COUNT`, `Center/MHz`, `Rate/Mbps`, `PDU`, `RSSI/dBFS`, `SNR/dB`,
+`Address` and `Details`. The table is limited to the terminal height and retains
 at most 2,048 unique rows.
 
 The compact and interactive options are mutually exclusive. Interactive mode

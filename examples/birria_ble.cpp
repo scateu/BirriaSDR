@@ -54,6 +54,7 @@ struct Options {
     bool sweep = false;
     bool frequency_set = false;
     bool dwell_set = false;
+    bool compact = false;
     bool verbose = false;
     bool include_invalid = false;
     bool self_test = false;
@@ -76,6 +77,7 @@ void usage(const char *program)
         << "  --sweep                 Monitor all primary advertising channels\n"
         << "  --dwell-ms MS           Sweep dwell per channel (default 1000)\n"
         << "  --include-invalid       Print access-address hits with a bad CRC\n"
+        << "  --compact               Print one compact line per packet\n"
         << "  --verbose               Print rejected packet diagnostics to stderr\n"
         << "  --self-test             Test PHY, CRC, whitening and AirTag parsing\n"
         << "  --help                  Show this help\n"
@@ -121,6 +123,8 @@ bool parse_options(int argc, char **argv, Options &options)
             std::exit(0);
         } else if (option == "--verbose") {
             options.verbose = true;
+        } else if (option == "--compact") {
+            options.compact = true;
         } else if (option == "--udp") {
             options.udp = true;
         } else if (option == "--manual") {
@@ -480,6 +484,46 @@ std::vector<std::string> parse_ad(const uint8_t *data, size_t length)
     return elements;
 }
 
+
+struct CompactAdInfo {
+    std::string name;
+    int company = -1;
+    int apple_type = -1;
+    int find_my_status = -1;
+    bool find_my = false;
+    bool ibeacon = false;
+};
+
+CompactAdInfo compact_ad_info(const uint8_t *data, size_t length)
+{
+    CompactAdInfo info;
+    size_t offset = 0;
+    while (offset < length) {
+        uint8_t field_length = data[offset++];
+        if (!field_length || field_length > length - offset)
+            break;
+        uint8_t type = data[offset];
+        const uint8_t *field = data + offset + 1;
+        size_t field_bytes = field_length - 1;
+        if ((type == 0x08 || type == 0x09) && field_bytes)
+            info.name = quoted(field, field_bytes);
+        if (type == 0xff && field_bytes >= 2) {
+            info.company = get_le16(field);
+            if (info.company == 0x004c && field_bytes >= 4) {
+                info.apple_type = field[2];
+                if (field_bytes >= 28 && field[2] == 0x12 && field[3] == 0x19) {
+                    info.find_my = true;
+                    info.find_my_status = field[4];
+                } else if (field_bytes >= 25 && field[2] == 0x02 && field[3] == 0x15) {
+                    info.ibeacon = true;
+                }
+            }
+        }
+        offset += field_length;
+    }
+    return info;
+}
+
 struct PacketMetrics {
     uint64_t input_sample = 0;
     double rssi_dbfs = 0;
@@ -489,11 +533,12 @@ struct PacketMetrics {
 class ChannelDecoder {
 public:
     ChannelDecoder(unsigned channel, uint64_t center_frequency, uint32_t input_rate,
-                   uint64_t input_base, bool verbose, bool include_invalid,
-                   bool quiet = false)
+                   uint64_t input_base, bool compact, bool verbose,
+                   bool include_invalid, bool quiet = false)
         : channel_(channel), center_frequency_(center_frequency), input_rate_(input_rate),
           decimation_(input_rate / static_cast<uint32_t>(CHANNEL_RATE)),
-          input_base_(input_base), verbose_(verbose), include_invalid_(include_invalid),
+          input_base_(input_base), compact_(compact), verbose_(verbose),
+          include_invalid_(include_invalid),
           quiet_(quiet)
     {
         double offset = static_cast<double>(channel_frequency(channel_))
@@ -784,6 +829,54 @@ private:
         bool rx_random = (bytes[0] & 0x80) != 0;
         size_t length = bytes[1] & 0x3f;
         PacketMetrics packet_metrics = metrics(candidate, bytes.size());
+        const uint8_t *payload = bytes.data() + 2;
+        if (compact_) {
+            std::ostringstream compact;
+            compact << std::fixed << std::setprecision(6)
+                    << "ble time=" << static_cast<double>(packet_metrics.input_sample) / input_rate_
+                    << "s sample=" << packet_metrics.input_sample
+                    << " ch=" << channel_ << " pdu=" << pdu_name(type)
+                    << " len=" << length;
+            const uint8_t *ad = nullptr;
+            size_t ad_length = 0;
+            if ((type == 0 || type == 2 || type == 4 || type == 6) && length >= 6) {
+                compact << " addr=" << address_string(payload);
+                ad = payload + 6;
+                ad_length = length - 6;
+            } else if (type == 1 && length >= 12) {
+                compact << " addr=" << address_string(payload)
+                        << " target=" << address_string(payload + 6);
+            } else if (type == 3 && length >= 12) {
+                compact << " scanner=" << address_string(payload)
+                        << " addr=" << address_string(payload + 6);
+            } else if (type == 5 && length >= 12) {
+                compact << " initiator=" << address_string(payload)
+                        << " addr=" << address_string(payload + 6);
+            }
+            if (ad) {
+                CompactAdInfo info = compact_ad_info(ad, ad_length);
+                if (!info.name.empty())
+                    compact << " name=" << info.name;
+                if (info.company >= 0)
+                    compact << " company=0x" << std::hex << std::setw(4)
+                            << std::setfill('0') << info.company << std::dec;
+                if (info.apple_type >= 0)
+                    compact << " apple=0x" << std::hex << std::setw(2)
+                            << info.apple_type << std::dec;
+                if (info.find_my)
+                    compact << " find_my=1 status=0x" << std::hex << std::setw(2)
+                            << info.find_my_status << std::dec;
+                if (info.ibeacon)
+                    compact << " ibeacon=1";
+            }
+            compact << " rssi=" << std::setprecision(1) << packet_metrics.rssi_dbfs
+                    << "dBFS crc=" << (crc_valid ? "ok" : "bad");
+            if (!quiet_) {
+                std::cout << compact.str() << '\n';
+                std::cout.flush();
+            }
+            return;
+        }
         std::ostringstream output;
         output << std::fixed << std::setprecision(6)
                << "ble time=" << static_cast<double>(packet_metrics.input_sample) / input_rate_
@@ -800,7 +893,6 @@ private:
                << " tx_add=" << (tx_random ? "random" : "public")
                << " rx_add=" << (rx_random ? "random" : "public")
                << " chsel=" << chsel;
-        const uint8_t *payload = bytes.data() + 2;
         if ((type == 0 || type == 2 || type == 4 || type == 6) && length >= 6) {
             append_address(output, "advertiser", payload, tx_random);
             append_ad(output, payload + 6, length - 6);
@@ -917,6 +1009,7 @@ private:
     uint32_t input_rate_;
     unsigned decimation_;
     uint64_t input_base_;
+    bool compact_;
     bool verbose_;
     bool include_invalid_;
     bool quiet_;
@@ -946,7 +1039,8 @@ public:
     {
         for (unsigned channel : options.channels)
             decoders_.emplace_back(channel, options.center_frequency, options.sample_rate,
-                                   input_base, options.verbose, options.include_invalid, quiet);
+                                   input_base, options.compact, options.verbose,
+                                   options.include_invalid, quiet);
     }
 
     void feed_cs16(const uint8_t *bytes, size_t length)

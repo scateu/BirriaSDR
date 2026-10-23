@@ -158,6 +158,7 @@ Run the help command for the current option summary:
 | `--csi-format FORMAT` | `binary` | Selects `binary` or `jsonl`, and requires `--csi` |
 | `--csi-invalid` | Disabled | Includes SIGNAL-valid candidates whose MAC FCS failed |
 | `--csi-normalize` | Disabled | Adds a unit-RMS CSI vector |
+| `--compact` | Disabled | Prints one compact line per valid frame |
 | `--verbose` | Disabled | Prints rejected PSDU diagnostics |
 | `--self-test` | Disabled | Tests coding, CSI, CRC and MAC parsing |
 | `--help` | Not applicable | Prints the option summary and exits |
@@ -197,6 +198,23 @@ The `rssi` value is not calibrated in dBm. It is useful for comparisons within a
 capture that keeps the same gain settings. The `snr` value is an estimate from
 the repeated long-training symbols, and interference or channel variation can
 bias it.
+
+
+Detailed output remains the default. The compact option emits one line and
+suppresses the second beacon or probe-response detail line:
+
+```sh
+./build/birria_wifi --compact
+```
+
+A compact beacon has this form:
+
+```text
+wifi time=0.103745s sample=4149784 center=2412000000Hz rate=6Mbps pdu=beacon len=443 src=88:9e:96:a0:b4:8b dst=ff:ff:ff:ff:ff:ff ssid="example" channel=1 rssi=-38.5dBFS snr=18.7dB fcs=ok
+```
+
+The compact record keeps timing, center, rate, frame subtype, length, available
+addresses, SSID and advertised channel, signal estimates and FCS state.
 
 ### Beacon and probe response output
 

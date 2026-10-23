@@ -60,6 +60,7 @@ struct Options {
     bool sweep = false;
     bool frequency_set = false;
     bool dwell_set = false;
+    bool compact = false;
     bool verbose = false;
     bool csi_invalid = false;
     bool csi_normalize = false;
@@ -132,6 +133,7 @@ void usage(const char *program)
         << "  --csi-format FORMAT     binary or jsonl (default binary)\n"
         << "  --csi-invalid           Include SIGNAL-valid frames with failed FCS\n"
         << "  --csi-normalize         Include an RMS-normalized CSI vector\n"
+        << "  --compact               Print one compact line per valid frame\n"
         << "  --verbose               Print rejected PSDU diagnostics\n"
         << "  --self-test             Test coding, CSI, CRC and MAC parsing\n"
         << "  --help                  Show this help\n"
@@ -164,6 +166,8 @@ bool parse_options(int argc, char **argv, Options &options)
             std::exit(0);
         } else if (option == "--verbose") {
             options.verbose = true;
+        } else if (option == "--compact") {
+            options.compact = true;
         } else if (option == "--udp") {
             options.udp = true;
         } else if (option == "--manual") {
@@ -856,10 +860,11 @@ struct DecoderStats {
 class Decoder {
 public:
     Decoder(uint64_t center_frequency, uint64_t input_center_frequency,
-            uint32_t input_rate, uint64_t input_base, bool verbose, CsiWriter *csi)
+            uint32_t input_rate, uint64_t input_base, bool compact, bool verbose,
+            CsiWriter *csi)
         : center_frequency_(center_frequency), input_rate_(input_rate),
           input_decimation_(input_rate / static_cast<uint32_t>(WIFI_RATE)),
-          input_base_(input_base), verbose_(verbose), csi_(csi)
+          input_base_(input_base), compact_(compact), verbose_(verbose), csi_(csi)
     {
         double offset = static_cast<double>(center_frequency)
             - static_cast<double>(input_center_frequency);
@@ -1153,6 +1158,29 @@ private:
         double time = static_cast<double>(input_sample) / input_rate_;
         double cfo = omega * WIFI_RATE / (2.0 * PI);
         std::ostream &output = csi_ && csi_->uses_stdout() ? std::cerr : std::cout;
+        if (compact_) {
+            output << std::fixed << std::setprecision(6)
+                   << "wifi time=" << time << "s sample=" << input_sample;
+            if (center_frequency_)
+                output << " center=" << center_frequency_ << "Hz";
+            output << " rate=" << rate.mbps << "Mbps"
+                   << " pdu=" << subtype_name(info.type, info.subtype)
+                   << " len=" << frame.size();
+            if (!info.source.empty())
+                output << " src=" << info.source;
+            if (!info.destination.empty())
+                output << " dst=" << info.destination;
+            if (!info.bssid.empty() && info.bssid != info.source)
+                output << " bssid=" << info.bssid;
+            if (!info.ssid.empty())
+                output << " ssid=" << info.ssid;
+            if (info.channel >= 0)
+                output << " channel=" << info.channel;
+            output << " rssi=" << std::setprecision(1) << metrics.rssi_dbfs << "dBFS"
+                   << " snr=" << metrics.snr_db << "dB fcs=ok\n";
+            output.flush();
+            return;
+        }
         output << std::fixed << std::setprecision(6)
                << "frame time=" << time << "s sample=" << input_sample;
         if (center_frequency_)
@@ -1382,6 +1410,7 @@ private:
     uint64_t input_base_;
     std::complex<float> oscillator_{1.0f, 0.0f};
     std::complex<float> oscillator_step_{1.0f, 0.0f};
+    bool compact_;
     bool verbose_;
     CsiWriter *csi_;
     std::vector<int> data_bins_;
@@ -1532,7 +1561,7 @@ private:
             decode_frequency = UINT64_C(2412000000)
                 + UINT64_C(5000000) * (software_channel_ - 1);
         return std::make_unique<Decoder>(decode_frequency, input_frequency,
-            options_.sample_rate, input_base, options_.verbose, csi_);
+            options_.sample_rate, input_base, options_.compact, options_.verbose, csi_);
     }
 
     void feed(const int16_t *iq, uint32_t count, uint64_t first_sample,
@@ -1797,7 +1826,7 @@ int main(int argc, char **argv)
     std::array<uint8_t, 65536> buffer{};
     if (!options.file.empty()) {
         Decoder decoder(options.center_frequency, options.center_frequency,
-                        options.sample_rate, 0, options.verbose, &csi);
+                        options.sample_rate, 0, options.compact, options.verbose, &csi);
         FILE *file = std::fopen(options.file.c_str(), "rb");
         if (!file) {
             std::perror("Input file");
@@ -1829,7 +1858,7 @@ int main(int argc, char **argv)
         totals = decoder.stats();
     } else if (options.udp) {
         Decoder decoder(options.center_frequency, options.center_frequency,
-                        options.sample_rate, 0, options.verbose, &csi);
+                        options.sample_rate, 0, options.compact, options.verbose, &csi);
         int fd = open_udp_receiver(options);
         if (fd < 0)
             return 1;

@@ -169,6 +169,24 @@ The `rssi_dbfs` value is uncalibrated. It describes channelized sample power
 relative to the signed 16-bit numeric range, not received power in dBm. The
 `cfo_hz` value is estimated from the two GFSK frequency clusters.
 
+
+Detailed output remains the default. The compact option removes raw payloads,
+CRC byte strings and expanded advertising structures:
+
+```sh
+./build/birria_ble --compact
+```
+
+A compact Find My record has this form:
+
+```text
+ble time=0.009208s sample=368315 ch=38 pdu=ADV_IND len=37 addr=ed:26:f2:85:f5:56 company=0x004c apple=0x12 find_my=1 status=0x2a rssi=-61.7dBFS crc=ok
+```
+
+The compact record retains timing, channel, PDU type, principal addresses,
+local name when present, manufacturer identifier, Apple and Find My markers,
+signal power and CRC state.
+
 ## Command line options
 
 Run the help command for the current option summary:
@@ -192,6 +210,7 @@ Run the help command for the current option summary:
 | `--sweep` | Disabled | Monitors all three primary advertising channels in native mode |
 | `--dwell-ms MS` | `1000` | Selects the sweep dwell per advertising channel |
 | `--include-invalid` | Disabled | Prints access address hits whose decoded CRC is invalid |
+| `--compact` | Disabled | Prints one compact line without raw payload expansion |
 | `--verbose` | Disabled | Prints rejected candidate diagnostics |
 | `--self-test` | Disabled | Runs the offline PHY and parser test |
 | `--help` | Not applicable | Prints the option summary and exits |

@@ -123,7 +123,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 The last command records eight million complex samples from device 0 with fixed
-manual gain codes (LNA 2, filter stage 8, digital 0). Leave out `manual` to
+manual gain codes (LNA 2 below 4.5 GHz or LNA 5 above, filter stage 8, digital 0). Leave out `manual` to
 release the gain overrides, and leave out the sample count to record until you
 press Ctrl-C. The file holds little-endian signed 16-bit **I, Q** pairs, with
 each component between −8192 and 8191. The recorder applies no averaging or
@@ -157,8 +157,7 @@ Then start the sender:
 The sender uses device 0, destination `127.0.0.1:1234`, 2,048 complex samples
 per datagram and three automatic recovery attempts by default. Run
 `./build/birria_udp --help` to select another device, destination, packet size
-or recovery budget. The manual option uses the same LNA 2, filter stage 8 and
-digital 0 gain codes as the recorder example.
+or recovery budget. The manual option uses LNA 2 below 4.5 GHz or LNA 5 above, with filter stage 8 and digital 0.
 
 The stream carries 160 MB/s of UDP payload, so the default destination is the
 local host. A one gigabit network cannot carry the full stream. Remote use

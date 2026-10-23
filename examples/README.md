@@ -33,7 +33,7 @@ The recorder writes little-endian signed 16-bit I and Q pairs. The source values
 ./build/birria_rx capture.cs16 16000000 manual
 ```
 
-This command records 16,000,000 complex samples from device 0. The manual argument selects LNA code 2, filter stage code 8 and digital code 0. Leave out the sample count to continue until you press Ctrl-C. Use the frequency option to select another center frequency:
+This command records 16,000,000 complex samples from device 0. The manual argument selects LNA code 2 below 4.5 GHz or code 5 above, with filter stage code 8 and digital code 0. Leave out the sample count to continue until you press Ctrl-C. Use the frequency option to select another center frequency:
 
 ```sh
 ./build/birria_rx --frequency 2437000000 capture.cs16 16000000 manual
@@ -68,7 +68,7 @@ Start the sender from the repository root:
 ./build/birria_udp --frequency 2437000000 --manual
 ```
 
-The default command uses device 0 and sends to `127.0.0.1:1234`. It places 2,048 complex samples in each datagram and permits three bounded recovery restarts. The manual option selects the same LNA 2, filter stage 8 and digital 0 codes as the recorder.
+The default command uses device 0 and sends to `127.0.0.1:1234`. It places 2,048 complex samples in each datagram and permits three bounded recovery restarts. The manual option selects LNA 2 below 4.5 GHz or LNA 5 above, with filter stage 8 and digital 0.
 
 Keep the SDR++ displayed center frequency equal to the frequency passed to `birria_udp`. This keeps the frequency labels aligned with the actual receiver center.
 
@@ -89,7 +89,7 @@ Run the help command to see the accepted options:
 | `--device INDEX` | `0` | Selects a device from the `birria_rx --list` output |
 | `--packet-samples COUNT` | `2048` | Selects 1 to 16,376 complex samples per datagram |
 | `--recovery COUNT` | `3` | Selects the bounded full restart budget, and zero disables recovery |
-| `--manual` | Disabled | Selects LNA 2, filter stage 8 and digital 0 |
+| `--manual` | Disabled | Selects LNA 2 below 4.5 GHz or LNA 5 above, with filter stage 8 and digital 0 |
 | `--help` | Not applicable | Prints the option summary without opening hardware |
 
 The following command selects device 1, changes the center frequency and sends larger datagrams to a local SDR++ instance:

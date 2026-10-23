@@ -60,7 +60,7 @@ static void usage(FILE *file, const char *program)
             "  --device INDEX          Device index (default 0)\n"
             "  --packet-samples COUNT  Complex samples per datagram (default 2048, max 16376)\n"
             "  --recovery COUNT        Full stream restart budget (default 3, 0 disables)\n"
-            "  --manual                Use gain codes LNA 2, filter 8, digital 0\n"
+            "  --manual                Use LNA 2 below 4.5 GHz or LNA 5 above, filter 8, digital 0\n"
             "  --help                  Show this help\n"
             "The 80 MSps mode is experimental. The 160 MSps CS16 mode is expected to overrun.\n",
             program);
@@ -322,7 +322,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "Frequency: %s\n", birriasdr_strerror(result));
     }
     if (!result && options.manual_gain) {
-        const struct birriasdr_gain gain = {2, 8, 0};
+        uint64_t high_min = 0, high_max = 0;
+        int high_band = birriasdr_get_tuning_band(dev, 1, &high_min, &high_max) == 0 &&
+                        options.frequency >= high_min && options.frequency <= high_max;
+        const struct birriasdr_gain gain = {(uint8_t)(high_band ? 5 : 2), 8, 0};
         result = birriasdr_set_tuner_gain_mode(dev, 1);
         if (!result)
             result = birriasdr_set_gain_codes(dev, &gain);

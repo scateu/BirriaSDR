@@ -152,7 +152,10 @@ int main(int argc, char **argv)
         return 1;
     }
     if (argc - argument == 3) {
-        const struct birriasdr_gain gain = {2, 8, 0};
+        uint64_t high_min = 0, high_max = 0;
+        int high_band = birriasdr_get_tuning_band(dev, 1, &high_min, &high_max) == 0 &&
+                        frequency >= high_min && frequency <= high_max;
+        const struct birriasdr_gain gain = {(uint8_t)(high_band ? 5 : 2), 8, 0};
         result = birriasdr_set_tuner_gain_mode(dev, 1);
         if (!result)
             result = birriasdr_set_gain_codes(dev, &gain);

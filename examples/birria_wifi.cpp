@@ -127,7 +127,7 @@ void usage(const char *program)
         << "  --frequency HZ          Native tuning frequency or input label\n"
         << "  --device INDEX          Native USB device index (default 0)\n"
         << "  --sample-rate RATE      40000000, 80000000 or 160000000\n"
-        << "  --manual                Use native gain codes LNA 2, filter 8, digital 0\n"
+        << "  --manual                Use LNA 2 below 4.5 GHz or LNA 5 above, filter 8, digital 0\n"
         << "  --recovery COUNT        Native restart budget (default 3)\n"
         << "  --sweep                 Sweep Wi-Fi channels 1 through 13, native only\n"
         << "  --dwell-ms MS           Sweep dwell per channel (default 500)\n"

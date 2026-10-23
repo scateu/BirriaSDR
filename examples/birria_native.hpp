@@ -74,7 +74,10 @@ public:
                 std::fprintf(stderr, "Frequency: %s\n", birriasdr_strerror(result));
         }
         if (!result && options_.manual_gain) {
-            const birriasdr_gain gain{2, 8, 0};
+            uint64_t high_min = 0, high_max = 0;
+            bool high_band = birriasdr_get_tuning_band(dev_, 1, &high_min, &high_max) == 0
+                && frequencies_.front() >= high_min && frequencies_.front() <= high_max;
+            const birriasdr_gain gain{static_cast<uint8_t>(high_band ? 5 : 2), 8, 0};
             result = birriasdr_set_tuner_gain_mode(dev_, 1);
             if (!result)
                 result = birriasdr_set_gain_codes(dev_, &gain);

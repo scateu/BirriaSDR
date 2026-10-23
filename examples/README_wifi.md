@@ -48,7 +48,7 @@ Select another center or device when needed:
     --manual
 ```
 
-The manual option applies LNA 2, filter stage 8 and digital 0. Decoder work runs
+The manual option applies LNA 2 below 4.5 GHz or LNA 5 above, with filter stage 8 and digital 0. Decoder work runs
 on a separate worker so packet processing does not block USB delivery. A decoder
 queue overflow is reported as an error rather than hidden.
 
@@ -150,7 +150,7 @@ Run the help command for the current option summary:
 | `--frequency HZ` | `2437000000` in native mode | Selects native tuning or labels file and UDP input |
 | `--device INDEX` | `0` | Selects the native USB device |
 | `--sample-rate RATE` | `40000000` | Selects 40, 80 or 160 MSps |
-| `--manual` | Disabled | Selects LNA 2, filter stage 8 and digital 0 for native capture |
+| `--manual` | Disabled | Selects LNA 2 below 4.5 GHz or LNA 5 above, with filter stage 8 and digital 0 |
 | `--recovery COUNT` | `3` | Selects the native full restart budget |
 | `--sweep` | Disabled | Monitors Wi-Fi channel centers 1 through 13 in native mode |
 | `--dwell-ms MS` | `500` | Selects sweep dwell per channel |

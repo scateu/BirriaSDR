@@ -26,6 +26,7 @@
 #include <memory>
 #include "birria_native.hpp"
 #include "birria_tui.hpp"
+#include <csignal>
 
 namespace {
 

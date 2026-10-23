@@ -29,6 +29,7 @@
 #include <memory>
 #include "birria_native.hpp"
 #include "birria_tui.hpp"
+#include <csignal>
 
 namespace {
 
@@ -129,7 +130,7 @@ void usage(const char *program)
         << "  --sample-rate RATE      40000000, 80000000 or 160000000\n"
         << "  --manual                Use LNA 2 below 4.5 GHz or LNA 5 above, filter 8, digital 0\n"
         << "  --recovery COUNT        Native restart budget (default 3)\n"
-        << "  --sweep                 Sweep Wi-Fi channels 1 through 13, native only\n"
+        << "  --sweep                 Sweep 2.4 and 5 GHz Wi-Fi channels, native only\n"
         << "  --dwell-ms MS           Sweep dwell per channel (default 500)\n"
         << "  --csi PATH              Write CSI records, or - for standard output\n"
         << "  --csi-format FORMAT     binary or jsonl (default binary)\n"
@@ -1612,13 +1613,53 @@ private:
         }
     }
 
+    void configure_software_frequencies(uint64_t input_frequency)
+    {
+        software_frequencies_.clear();
+        software_position_ = 0;
+        software_samples_ = 0;
+        if (input_frequency == UINT64_C(2442000000)) {
+            for (unsigned channel = 1; channel <= 13; ++channel)
+                software_frequencies_.push_back(UINT64_C(2412000000)
+                    + UINT64_C(5000000) * (channel - 1));
+            return;
+        }
+        struct Window {
+            uint64_t center;
+            std::array<uint64_t, 4> channels;
+        };
+        static const std::array<Window, 7> windows{{
+            {UINT64_C(5210000000), {UINT64_C(5180000000), UINT64_C(5200000000),
+                                    UINT64_C(5220000000), UINT64_C(5240000000)}},
+            {UINT64_C(5290000000), {UINT64_C(5260000000), UINT64_C(5280000000),
+                                    UINT64_C(5300000000), UINT64_C(5320000000)}},
+            {UINT64_C(5530000000), {UINT64_C(5500000000), UINT64_C(5520000000),
+                                    UINT64_C(5540000000), UINT64_C(5560000000)}},
+            {UINT64_C(5610000000), {UINT64_C(5580000000), UINT64_C(5600000000),
+                                    UINT64_C(5620000000), UINT64_C(5640000000)}},
+            {UINT64_C(5690000000), {UINT64_C(5660000000), UINT64_C(5680000000),
+                                    UINT64_C(5700000000), UINT64_C(5720000000)}},
+            {UINT64_C(5775000000), {UINT64_C(5745000000), UINT64_C(5765000000),
+                                    UINT64_C(5785000000), UINT64_C(5805000000)}},
+            {UINT64_C(5855000000), {UINT64_C(5825000000), UINT64_C(5845000000),
+                                    UINT64_C(5865000000), UINT64_C(5885000000)}}
+        }};
+        for (const Window &window : windows) {
+            if (window.center == input_frequency) {
+                software_frequencies_.assign(window.channels.begin(), window.channels.end());
+                return;
+            }
+        }
+        software_frequencies_.push_back(input_frequency);
+    }
+
     std::unique_ptr<Decoder> make_decoder(uint64_t input_frequency,
                                           uint64_t input_base)
     {
         uint64_t decode_frequency = input_frequency;
-        if (options_.sweep && options_.sample_rate >= 80000000u)
-            decode_frequency = UINT64_C(2412000000)
-                + UINT64_C(5000000) * (software_channel_ - 1);
+        if (options_.sweep && options_.sample_rate >= 80000000u
+            && !software_frequencies_.empty())
+            decode_frequency = software_frequencies_[software_position_];
         return std::make_unique<Decoder>(decode_frequency, input_frequency,
             options_.sample_rate, input_base, options_.compact, options_.verbose,
             csi_, screen_);
@@ -1628,6 +1669,8 @@ private:
               uint64_t frequency, uint64_t epoch)
     {
         if (!decoder_) {
+            if (options_.sweep && options_.sample_rate >= 80000000u)
+                configure_software_frequencies(frequency);
             decoder_ = make_decoder(frequency, first_sample);
             epoch_ = epoch;
         } else if (epoch != epoch_) {
@@ -1635,6 +1678,8 @@ private:
             decoder_.reset();
             epoch_ = epoch;
             pending_frequency_ = frequency;
+            if (options_.sweep && options_.sample_rate >= 80000000u)
+                configure_software_frequencies(frequency);
             discard_remaining_ = settle_samples_;
         }
         uint32_t skip = static_cast<uint32_t>(std::min<uint64_t>(count, discard_remaining_));
@@ -1661,7 +1706,8 @@ private:
                 totals_ += decoder_->stats();
                 decoder_.reset();
                 software_samples_ = 0;
-                software_channel_ = software_channel_ == 13 ? 1 : software_channel_ + 1;
+                if (!software_frequencies_.empty())
+                    software_position_ = (software_position_ + 1) % software_frequencies_.size();
                 if (done < count)
                     decoder_ = make_decoder(frequency, first_sample + done);
             }
@@ -1674,7 +1720,8 @@ private:
     uint64_t settle_samples_;
     uint64_t software_dwell_samples_;
     uint64_t software_samples_ = 0;
-    unsigned software_channel_ = 1;
+    std::vector<uint64_t> software_frequencies_;
+    size_t software_position_ = 0;
     uint64_t discard_remaining_ = 0;
     uint64_t pending_frequency_ = 0;
     uint64_t epoch_ = std::numeric_limits<uint64_t>::max();
@@ -1973,11 +2020,34 @@ int main(int argc, char **argv)
         if (!options.interactive)
             birria_native::print_rate_warning(options.sample_rate);
         std::vector<uint64_t> frequencies;
+        std::vector<uint32_t> step_dwell_ms;
+        auto add_5g_channels = [&](auto append) {
+            for (unsigned channel = 36; channel <= 64; channel += 4)
+                append(UINT64_C(5000000000) + UINT64_C(5000000) * channel);
+            for (unsigned channel = 100; channel <= 144; channel += 4)
+                append(UINT64_C(5000000000) + UINT64_C(5000000) * channel);
+            for (unsigned channel = 149; channel <= 177; channel += 4)
+                append(UINT64_C(5000000000) + UINT64_C(5000000) * channel);
+        };
+        auto scaled_dwell = [&](uint32_t channel_count) {
+            uint64_t value = static_cast<uint64_t>(options.dwell_ms) * channel_count;
+            return static_cast<uint32_t>(std::min<uint64_t>(value, UINT32_MAX));
+        };
         if (options.sweep && options.sample_rate == 40000000u) {
             for (unsigned channel = 1; channel <= 13; ++channel)
-                frequencies.push_back(UINT64_C(2412000000) + UINT64_C(5000000) * (channel - 1));
+                frequencies.push_back(UINT64_C(2412000000)
+                    + UINT64_C(5000000) * (channel - 1));
+            add_5g_channels([&](uint64_t frequency) { frequencies.push_back(frequency); });
         } else if (options.sweep) {
-            frequencies.push_back(UINT64_C(2442000000));
+            frequencies = {
+                UINT64_C(2442000000), UINT64_C(5210000000), UINT64_C(5290000000),
+                UINT64_C(5530000000), UINT64_C(5610000000), UINT64_C(5690000000),
+                UINT64_C(5775000000), UINT64_C(5855000000)
+            };
+            step_dwell_ms = {
+                scaled_dwell(13), scaled_dwell(4), scaled_dwell(4), scaled_dwell(4),
+                scaled_dwell(4), scaled_dwell(4), scaled_dwell(4), scaled_dwell(4)
+            };
         } else {
             frequencies.push_back(options.frequency_set
                 ? options.center_frequency : DEFAULT_NATIVE_FREQUENCY);
@@ -1987,11 +2057,11 @@ int main(int argc, char **argv)
             message << "Native USB device " << options.device_index
                     << " at " << options.sample_rate << " S/s";
             if (options.sweep && options.sample_rate == 40000000u)
-                message << ", RF-sweeping Wi-Fi channels 1 through 13 every "
-                        << options.dwell_ms << " ms";
+                message << ", RF-sweeping 2.4 and 5 GHz channels every "
+                        << options.dwell_ms << " ms per channel";
             else if (options.sweep)
-                message << ", software-sweeping Wi-Fi channels 1 through 13 every "
-                        << options.dwell_ms << " ms";
+                message << ", software-sweeping 2.4 and 5 GHz channels every "
+                        << options.dwell_ms << " ms per channel";
             else
                 message << ", center " << frequencies.front() << " Hz";
             if (options.sample_rate != 40000000u)
@@ -2010,7 +2080,7 @@ int main(int argc, char **argv)
         callbacks.gap = NativeWifiContext::gap;
         callbacks.context = &context;
         birria_native::Session session(native_options, frequencies, options.dwell_ms,
-                                       interrupted, callbacks);
+                                       interrupted, callbacks, step_dwell_ms);
         birria_native::Result result = session.run();
         totals = context.finish();
         bool decoder_dropped = context.dropped();

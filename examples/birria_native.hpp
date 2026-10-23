@@ -46,16 +46,18 @@ class Session {
 public:
     Session(const Options &options, const std::vector<uint64_t> &frequencies,
             uint32_t dwell_ms, std::atomic<bool> &interrupted,
-            const Callbacks &callbacks)
+            const Callbacks &callbacks, std::vector<uint32_t> step_dwell_ms = {})
         : options_(options), frequencies_(frequencies), dwell_ms_(dwell_ms),
-          interrupted_(interrupted), callbacks_(callbacks)
+          step_dwell_ms_(std::move(step_dwell_ms)), interrupted_(interrupted),
+          callbacks_(callbacks)
     {
     }
 
     Result run()
     {
         Result output;
-        if (frequencies_.empty()) {
+        if (frequencies_.empty() || (!step_dwell_ms_.empty()
+            && step_dwell_ms_.size() != frequencies_.size())) {
             output.stream_error = BIRRIASDR_ERROR_INVALID;
             return output;
         }
@@ -74,13 +76,9 @@ public:
                 std::fprintf(stderr, "Frequency: %s\n", birriasdr_strerror(result));
         }
         if (!result && options_.manual_gain) {
-            uint64_t high_min = 0, high_max = 0;
-            bool high_band = birriasdr_get_tuning_band(dev_, 1, &high_min, &high_max) == 0
-                && frequencies_.front() >= high_min && frequencies_.front() <= high_max;
-            const birriasdr_gain gain{static_cast<uint8_t>(high_band ? 5 : 2), 8, 0};
             result = birriasdr_set_tuner_gain_mode(dev_, 1);
             if (!result)
-                result = birriasdr_set_gain_codes(dev_, &gain);
+                result = apply_manual_gain(frequencies_.front());
             if (result < 0)
                 std::fprintf(stderr, "Gain: %s\n", birriasdr_strerror(result));
         }
@@ -112,6 +110,15 @@ public:
     }
 
 private:
+    int apply_manual_gain(uint64_t frequency)
+    {
+        uint64_t high_min = 0, high_max = 0;
+        bool high_band = birriasdr_get_tuning_band(dev_, 1, &high_min, &high_max) == 0
+            && frequency >= high_min && frequency <= high_max;
+        const birriasdr_gain gain{static_cast<uint8_t>(high_band ? 5 : 2), 8, 0};
+        return birriasdr_set_gain_codes(dev_, &gain);
+    }
+
     static void sample_callback(const int16_t *iq, uint32_t count, uint64_t first_sample,
                                 void *context)
     {
@@ -142,7 +149,9 @@ private:
         size_t position = 0;
         std::unique_lock<std::mutex> lock(mutex_);
         while (!stop_.load() && !interrupted_.load()) {
-            if (condition_.wait_for(lock, std::chrono::milliseconds(dwell_ms_),
+            uint32_t wait_ms = step_dwell_ms_.empty() ? dwell_ms_
+                : step_dwell_ms_[position];
+            if (condition_.wait_for(lock, std::chrono::milliseconds(wait_ms),
                                     [this] { return stop_.load() || interrupted_.load(); }))
                 break;
             position = (position + 1) % frequencies_.size();
@@ -158,6 +167,19 @@ private:
                 (void)birriasdr_cancel_async(dev_);
                 condition_.notify_all();
                 return;
+            }
+            if (options_.manual_gain) {
+                result = apply_manual_gain(requested);
+                if (result < 0) {
+                    std::fprintf(stderr, "Sweep gain at %llu Hz: %s\n",
+                        static_cast<unsigned long long>(requested),
+                        birriasdr_strerror(result));
+                    control_error_.store(result);
+                    stop_.store(true);
+                    (void)birriasdr_cancel_async(dev_);
+                    condition_.notify_all();
+                    return;
+                }
             }
             frequency_.store(requested);
             uint64_t epoch = epoch_.fetch_add(1) + 1;
@@ -175,6 +197,7 @@ private:
     Options options_;
     std::vector<uint64_t> frequencies_;
     uint32_t dwell_ms_;
+    std::vector<uint32_t> step_dwell_ms_;
     std::atomic<bool> &interrupted_;
     Callbacks callbacks_;
     birriasdr_dev_t *dev_ = nullptr;

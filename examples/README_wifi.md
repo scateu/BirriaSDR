@@ -159,6 +159,7 @@ Run the help command for the current option summary:
 | `--csi-invalid` | Disabled | Includes SIGNAL-valid candidates whose MAC FCS failed |
 | `--csi-normalize` | Disabled | Adds a unit-RMS CSI vector |
 | `--compact` | Disabled | Prints one compact line per valid frame |
+| `--interactive` | Disabled | Shows a deduplicated live terminal table with count and last-seen age |
 | `--verbose` | Disabled | Prints rejected PSDU diagnostics |
 | `--self-test` | Disabled | Tests coding, CSI, CRC and MAC parsing |
 | `--help` | Not applicable | Prints the option summary and exits |
@@ -215,6 +216,24 @@ wifi time=0.103745s sample=4149784 center=2412000000Hz rate=6Mbps pdu=beacon len
 
 The compact record keeps timing, center, rate, frame subtype, length, available
 addresses, SSID and advertised channel, signal estimates and FCS state.
+
+The interactive mode opens an ANSI terminal screen:
+
+```sh
+./build/birria_wifi --sweep --interactive --manual
+```
+
+The screen combines repeated frames into one row. Beacon and probe-response
+traffic is grouped by BSSID. Other traffic is grouped by subtype and available
+source, destination and BSSID addresses. Each row shows a count, a continuously
+updated `LAST SEEN` age and the most recent compact details. Rows are ordered by
+recency, and the table is limited to the terminal height. The display retains
+at most 2,048 unique rows.
+
+The compact and interactive options are mutually exclusive. Interactive mode
+cannot be combined with rejected-packet diagnostics from `--verbose` and
+requires standard output to be a terminal and cannot be combined with
+`--csi -` because that option reserves standard output for CSI data.
 
 ### Beacon and probe response output
 

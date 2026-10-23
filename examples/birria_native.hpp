@@ -23,6 +23,7 @@ struct Options {
     uint32_t sample_rate = 40000000;
     uint32_t recovery_restarts = 3;
     bool manual_gain = false;
+    bool quiet = false;
 };
 
 struct Callbacks {
@@ -157,9 +158,11 @@ private:
             }
             frequency_.store(requested);
             uint64_t epoch = epoch_.fetch_add(1) + 1;
-            std::fprintf(stderr, "Sweep epoch %llu tuned to %llu Hz.\n",
-                static_cast<unsigned long long>(epoch),
-                static_cast<unsigned long long>(requested));
+            if (!options_.quiet) {
+                std::fprintf(stderr, "Sweep epoch %llu tuned to %llu Hz.\n",
+                    static_cast<unsigned long long>(epoch),
+                    static_cast<unsigned long long>(requested));
+            }
             lock.lock();
         }
         if (interrupted_.load())

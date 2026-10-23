@@ -25,6 +25,7 @@
 #include <vector>
 #include <memory>
 #include "birria_native.hpp"
+#include "birria_tui.hpp"
 
 namespace {
 
@@ -55,6 +56,7 @@ struct Options {
     bool frequency_set = false;
     bool dwell_set = false;
     bool compact = false;
+    bool interactive = false;
     bool verbose = false;
     bool include_invalid = false;
     bool self_test = false;
@@ -78,6 +80,7 @@ void usage(const char *program)
         << "  --dwell-ms MS           Sweep dwell per channel (default 1000)\n"
         << "  --include-invalid       Print access-address hits with a bad CRC\n"
         << "  --compact               Print one compact line per packet\n"
+        << "  --interactive           Show a deduplicated live terminal table\n"
         << "  --verbose               Print rejected packet diagnostics to stderr\n"
         << "  --self-test             Test PHY, CRC, whitening and AirTag parsing\n"
         << "  --help                  Show this help\n"
@@ -125,6 +128,8 @@ bool parse_options(int argc, char **argv, Options &options)
             options.verbose = true;
         } else if (option == "--compact") {
             options.compact = true;
+        } else if (option == "--interactive") {
+            options.interactive = true;
         } else if (option == "--udp") {
             options.udp = true;
         } else if (option == "--manual") {
@@ -195,6 +200,10 @@ bool parse_options(int argc, char **argv, Options &options)
     std::sort(options.channels.begin(), options.channels.end());
     options.channels.erase(std::unique(options.channels.begin(), options.channels.end()),
                            options.channels.end());
+    if (options.compact && options.interactive)
+        return false;
+    if (options.interactive && options.verbose)
+        return false;
     if (options.udp && !options.file.empty())
         return false;
     if (options.sweep && (options.udp || !options.file.empty()
@@ -534,12 +543,12 @@ class ChannelDecoder {
 public:
     ChannelDecoder(unsigned channel, uint64_t center_frequency, uint32_t input_rate,
                    uint64_t input_base, bool compact, bool verbose,
-                   bool include_invalid, bool quiet = false)
+                   bool include_invalid, bool quiet, birria_tui::Screen *screen)
         : channel_(channel), center_frequency_(center_frequency), input_rate_(input_rate),
           decimation_(input_rate / static_cast<uint32_t>(CHANNEL_RATE)),
           input_base_(input_base), compact_(compact), verbose_(verbose),
           include_invalid_(include_invalid),
-          quiet_(quiet)
+          quiet_(quiet), screen_(screen)
     {
         double offset = static_cast<double>(channel_frequency(channel_))
             - static_cast<double>(center_frequency_);
@@ -830,8 +839,9 @@ private:
         size_t length = bytes[1] & 0x3f;
         PacketMetrics packet_metrics = metrics(candidate, bytes.size());
         const uint8_t *payload = bytes.data() + 2;
-        if (compact_) {
+        if (compact_ || screen_) {
             std::ostringstream compact;
+            std::string row_key = std::string(pdu_name(type)) + "|";
             compact << std::fixed << std::setprecision(6)
                     << "ble time=" << static_cast<double>(packet_metrics.input_sample) / input_rate_
                     << "s sample=" << packet_metrics.input_sample
@@ -840,18 +850,26 @@ private:
             const uint8_t *ad = nullptr;
             size_t ad_length = 0;
             if ((type == 0 || type == 2 || type == 4 || type == 6) && length >= 6) {
-                compact << " addr=" << address_string(payload);
+                std::string address = address_string(payload);
+                compact << " addr=" << address;
+                row_key = "device|" + address;
                 ad = payload + 6;
                 ad_length = length - 6;
             } else if (type == 1 && length >= 12) {
-                compact << " addr=" << address_string(payload)
-                        << " target=" << address_string(payload + 6);
+                std::string address = address_string(payload);
+                std::string target = address_string(payload + 6);
+                compact << " addr=" << address << " target=" << target;
+                row_key += address + "|" + target;
             } else if (type == 3 && length >= 12) {
-                compact << " scanner=" << address_string(payload)
-                        << " addr=" << address_string(payload + 6);
+                std::string scanner = address_string(payload);
+                std::string address = address_string(payload + 6);
+                compact << " scanner=" << scanner << " addr=" << address;
+                row_key += scanner + "|" + address;
             } else if (type == 5 && length >= 12) {
-                compact << " initiator=" << address_string(payload)
-                        << " addr=" << address_string(payload + 6);
+                std::string initiator = address_string(payload);
+                std::string address = address_string(payload + 6);
+                compact << " initiator=" << initiator << " addr=" << address;
+                row_key += initiator + "|" + address;
             }
             if (ad) {
                 CompactAdInfo info = compact_ad_info(ad, ad_length);
@@ -871,7 +889,11 @@ private:
             }
             compact << " rssi=" << std::setprecision(1) << packet_metrics.rssi_dbfs
                     << "dBFS crc=" << (crc_valid ? "ok" : "bad");
-            if (!quiet_) {
+            if (screen_) {
+                if (row_key.back() == '|')
+                    row_key += hex_bytes(payload, std::min<size_t>(length, 8));
+                screen_->update(row_key, compact.str());
+            } else if (!quiet_) {
                 std::cout << compact.str() << '\n';
                 std::cout.flush();
             }
@@ -1013,6 +1035,7 @@ private:
     bool verbose_;
     bool include_invalid_;
     bool quiet_;
+    birria_tui::Screen *screen_;
     std::complex<float> oscillator_{1.0f, 0.0f};
     std::complex<float> oscillator_step_{1.0f, 0.0f};
     uint64_t oscillator_count_ = 0;
@@ -1035,12 +1058,13 @@ private:
 
 class Scanner {
 public:
-    Scanner(const Options &options, uint64_t input_base = 0, bool quiet = false)
+    Scanner(const Options &options, uint64_t input_base = 0, bool quiet = false,
+            birria_tui::Screen *screen = nullptr)
     {
         for (unsigned channel : options.channels)
             decoders_.emplace_back(channel, options.center_frequency, options.sample_rate,
                                    input_base, options.compact, options.verbose,
-                                   options.include_invalid, quiet);
+                                   options.include_invalid, quiet, screen);
     }
 
     void feed_cs16(const uint8_t *bytes, size_t length)
@@ -1312,8 +1336,8 @@ ScannerStats scanner_stats(const Scanner &scanner)
 
 class NativeBleContext {
 public:
-    explicit NativeBleContext(const Options &options)
-        : options_(options), settle_samples_(options.sample_rate / 10),
+    NativeBleContext(const Options &options, birria_tui::Screen *screen)
+        : options_(options), screen_(screen), settle_samples_(options.sample_rate / 10),
           software_dwell_samples_(static_cast<uint64_t>(options.sample_rate)
                                   * options.dwell_ms / 1000),
           worker_(&NativeBleContext::worker_loop, this)
@@ -1330,11 +1354,15 @@ public:
     static void gap(const birriasdr_recovery_event *event, uint64_t frequency,
                     uint64_t epoch, void *context)
     {
-        (void)context;
-        std::cerr << "Native stream gap before sample " << event->next_sample
-                  << ", epoch " << epoch << ", center " << frequency
-                  << " Hz, attempt " << event->attempt << ": "
-                  << birriasdr_strerror(event->error) << '\n';
+        NativeBleContext *native = static_cast<NativeBleContext *>(context);
+        std::ostringstream message;
+        message << "Gap before sample " << event->next_sample << ", epoch " << epoch
+                << ", center " << frequency << " Hz: "
+                << birriasdr_strerror(event->error);
+        if (native->screen_)
+            native->screen_->set_status(message.str());
+        else
+            std::cerr << message.str() << '\n';
     }
 
     bool dropped() const { return dropped_samples_ != 0; }
@@ -1351,9 +1379,14 @@ public:
         if (scanner_)
             totals_ += scanner_stats(*scanner_);
         scanner_.reset();
-        if (dropped_samples_)
-            std::cerr << "Native decoder queue dropped " << dropped_samples_
-                      << " samples.\n";
+        if (dropped_samples_) {
+            std::ostringstream message;
+            message << "Native decoder queue dropped " << dropped_samples_ << " samples.";
+            if (screen_)
+                screen_->set_status(message.str());
+            else
+                std::cerr << message.str() << '\n';
+        }
         return totals_;
     }
 
@@ -1441,7 +1474,7 @@ private:
             failed_ = true;
             return {};
         }
-        return std::make_unique<Scanner>(active, input_base);
+        return std::make_unique<Scanner>(active, input_base, false, screen_);
     }
 
     void feed(const int16_t *iq, uint32_t count, uint64_t first_sample,
@@ -1491,6 +1524,7 @@ private:
     }
 
     Options options_;
+    birria_tui::Screen *screen_;
     uint64_t settle_samples_;
     uint64_t software_dwell_samples_;
     uint64_t software_samples_ = 0;
@@ -1525,6 +1559,21 @@ int main(int argc, char **argv)
     }
     ::signal(SIGINT, handle_signal);
     ::signal(SIGTERM, handle_signal);
+    std::unique_ptr<birria_tui::Screen> screen;
+    if (options.interactive) {
+        if (!birria_tui::Screen::terminal_available()) {
+            std::cerr << "Interactive mode requires a terminal on standard output.\n";
+            return 2;
+        }
+        screen = std::make_unique<birria_tui::Screen>("BirriaSDR BLE monitor");
+        screen->set_status("Starting capture. Ctrl-C to stop.");
+    }
+    auto show_status = [&](const std::string &message) {
+        if (screen)
+            screen->set_status(message);
+        else
+            std::cerr << message << '\n';
+    };
 
     ScannerStats totals;
     bool input_failed = false;
@@ -1532,15 +1581,18 @@ int main(int argc, char **argv)
     if (!options.file.empty()) {
         if (!select_channels(options))
             return 2;
-        Scanner scanner(options);
+        Scanner scanner(options, 0, false, screen.get());
         FILE *file = std::fopen(options.file.c_str(), "rb");
         if (!file) {
             std::perror("Input file");
             return 1;
         }
-        std::cerr << "Reading " << options.sample_rate
-                  << " S/s little-endian CS16 from " << options.file
-                  << " at " << options.center_frequency << " Hz.\n";
+        {
+            std::ostringstream message;
+            message << "Reading " << options.sample_rate << " S/s little-endian CS16 from "
+                    << options.file << " at " << options.center_frequency << " Hz.";
+            show_status(message.str());
+        }
         while (!interrupted) {
             size_t count = std::fread(buffer.data(), 1, buffer.size(), file);
             if (count)
@@ -1566,13 +1618,17 @@ int main(int argc, char **argv)
     } else if (options.udp) {
         if (!select_channels(options))
             return 2;
-        Scanner scanner(options);
+        Scanner scanner(options, 0, false, screen.get());
         int fd = open_udp_receiver(options);
         if (fd < 0)
             return 1;
-        std::cerr << "Listening for " << options.sample_rate
-                  << " S/s little-endian CS16 on " << options.bind << ':'
-                  << options.port << " at " << options.center_frequency << " Hz.\n";
+        {
+            std::ostringstream message;
+            message << "Listening for " << options.sample_rate << " S/s little-endian CS16 on "
+                    << options.bind << ':' << options.port << " at "
+                    << options.center_frequency << " Hz.";
+            show_status(message.str());
+        }
         while (!interrupted) {
             ssize_t count = recv(fd, buffer.data(), buffer.size(), 0);
             if (count > 0)
@@ -1586,7 +1642,8 @@ int main(int argc, char **argv)
         close(fd);
         totals = scanner_stats(scanner);
     } else {
-        birria_native::print_rate_warning(options.sample_rate);
+        if (!options.interactive)
+            birria_native::print_rate_warning(options.sample_rate);
         std::vector<uint64_t> frequencies;
         if (options.sweep && options.sample_rate == 40000000u) {
             frequencies = {UINT64_C(2402000000), UINT64_C(2426000000),
@@ -1596,23 +1653,29 @@ int main(int argc, char **argv)
         } else {
             frequencies = {options.center_frequency};
         }
-        std::cerr << "Opening native USB device " << options.device_index
-                  << " at " << options.sample_rate << " S/s";
-        if (options.sweep && options.sample_rate == 40000000u)
-            std::cerr << ", RF-sweeping all BLE advertising channels every "
-                      << options.dwell_ms << " ms";
-        else if (options.sweep)
-            std::cerr << ", software-sweeping all BLE advertising channels in one "
-                      << "wide capture every " << options.dwell_ms << " ms";
-        else
-            std::cerr << ", center " << frequencies.front() << " Hz";
-        std::cerr << ".\n";
-        NativeBleContext context(options);
+        {
+            std::ostringstream message;
+            message << "Native USB device " << options.device_index
+                    << " at " << options.sample_rate << " S/s";
+            if (options.sweep && options.sample_rate == 40000000u)
+                message << ", RF-sweeping all BLE advertising channels every "
+                        << options.dwell_ms << " ms";
+            else if (options.sweep)
+                message << ", software-sweeping all BLE advertising channels every "
+                        << options.dwell_ms << " ms";
+            else
+                message << ", center " << frequencies.front() << " Hz";
+            if (options.sample_rate != 40000000u)
+                message << " (experimental rate)";
+            show_status(message.str());
+        }
+        NativeBleContext context(options, screen.get());
         birria_native::Options native_options;
         native_options.device_index = options.device_index;
         native_options.sample_rate = options.sample_rate;
         native_options.recovery_restarts = options.recovery_restarts;
         native_options.manual_gain = options.manual_gain;
+        native_options.quiet = options.interactive;
         birria_native::Callbacks callbacks;
         callbacks.samples = NativeBleContext::samples;
         callbacks.gap = NativeBleContext::gap;
@@ -1622,15 +1685,19 @@ int main(int argc, char **argv)
         birria_native::Result result = session.run();
         totals = context.finish();
         bool decoder_dropped = context.dropped();
-        std::cerr << "Native stream=" << birriasdr_strerror(result.stream_error)
-                  << ", control=" << birriasdr_strerror(result.control_error)
-                  << ", epochs=" << result.epochs
-                  << ", firmware state=" << result.stats.firmware_state
-                  << ", stage=" << result.stats.stage
-                  << ", reset=" << birriasdr_strerror(result.stats.reset_error) << '\n';
+        if (!options.interactive) {
+            std::cerr << "Native stream=" << birriasdr_strerror(result.stream_error)
+                      << ", control=" << birriasdr_strerror(result.control_error)
+                      << ", epochs=" << result.epochs
+                      << ", firmware state=" << result.stats.firmware_state
+                      << ", stage=" << result.stats.stage
+                      << ", reset=" << birriasdr_strerror(result.stats.reset_error) << '\n';
+        }
         input_failed = result.stream_error || result.control_error || result.close_error
             || decoder_dropped;
     }
+    if (screen)
+        screen.reset();
     std::cerr << "Input samples=" << totals.input_samples
               << ", valid BLE packets=" << totals.packets
               << ", CRC failures=" << totals.crc_failures

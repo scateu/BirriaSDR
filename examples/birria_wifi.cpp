@@ -28,6 +28,7 @@
 #include <vector>
 #include <memory>
 #include "birria_native.hpp"
+#include "birria_tui.hpp"
 
 namespace {
 
@@ -61,6 +62,7 @@ struct Options {
     bool frequency_set = false;
     bool dwell_set = false;
     bool compact = false;
+    bool interactive = false;
     bool verbose = false;
     bool csi_invalid = false;
     bool csi_normalize = false;
@@ -134,6 +136,7 @@ void usage(const char *program)
         << "  --csi-invalid           Include SIGNAL-valid frames with failed FCS\n"
         << "  --csi-normalize         Include an RMS-normalized CSI vector\n"
         << "  --compact               Print one compact line per valid frame\n"
+        << "  --interactive           Show a deduplicated live terminal table\n"
         << "  --verbose               Print rejected PSDU diagnostics\n"
         << "  --self-test             Test coding, CSI, CRC and MAC parsing\n"
         << "  --help                  Show this help\n"
@@ -168,6 +171,8 @@ bool parse_options(int argc, char **argv, Options &options)
             options.verbose = true;
         } else if (option == "--compact") {
             options.compact = true;
+        } else if (option == "--interactive") {
+            options.interactive = true;
         } else if (option == "--udp") {
             options.udp = true;
         } else if (option == "--manual") {
@@ -245,6 +250,12 @@ bool parse_options(int argc, char **argv, Options &options)
         && (options.csi_invalid || options.csi_normalize || options.csi_format != "binary"))
         return false;
     if (!options.file.empty() && options.file == options.csi_file)
+        return false;
+    if (options.compact && options.interactive)
+        return false;
+    if (options.interactive && options.verbose)
+        return false;
+    if (options.interactive && options.csi_file == "-")
         return false;
     if (options.udp && !options.file.empty())
         return false;
@@ -861,10 +872,11 @@ class Decoder {
 public:
     Decoder(uint64_t center_frequency, uint64_t input_center_frequency,
             uint32_t input_rate, uint64_t input_base, bool compact, bool verbose,
-            CsiWriter *csi)
+            CsiWriter *csi, birria_tui::Screen *screen)
         : center_frequency_(center_frequency), input_rate_(input_rate),
           input_decimation_(input_rate / static_cast<uint32_t>(WIFI_RATE)),
-          input_base_(input_base), compact_(compact), verbose_(verbose), csi_(csi)
+          input_base_(input_base), compact_(compact), verbose_(verbose), csi_(csi),
+          screen_(screen)
     {
         double offset = static_cast<double>(center_frequency)
             - static_cast<double>(input_center_frequency);
@@ -1158,27 +1170,40 @@ private:
         double time = static_cast<double>(input_sample) / input_rate_;
         double cfo = omega * WIFI_RATE / (2.0 * PI);
         std::ostream &output = csi_ && csi_->uses_stdout() ? std::cerr : std::cout;
-        if (compact_) {
-            output << std::fixed << std::setprecision(6)
+        if (compact_ || screen_) {
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(6)
                    << "wifi time=" << time << "s sample=" << input_sample;
             if (center_frequency_)
-                output << " center=" << center_frequency_ << "Hz";
-            output << " rate=" << rate.mbps << "Mbps"
+                line << " center=" << center_frequency_ << "Hz";
+            line << " rate=" << rate.mbps << "Mbps"
                    << " pdu=" << subtype_name(info.type, info.subtype)
                    << " len=" << frame.size();
             if (!info.source.empty())
-                output << " src=" << info.source;
+                line << " src=" << info.source;
             if (!info.destination.empty())
-                output << " dst=" << info.destination;
+                line << " dst=" << info.destination;
             if (!info.bssid.empty() && info.bssid != info.source)
-                output << " bssid=" << info.bssid;
+                line << " bssid=" << info.bssid;
             if (!info.ssid.empty())
-                output << " ssid=" << info.ssid;
+                line << " ssid=" << info.ssid;
             if (info.channel >= 0)
-                output << " channel=" << info.channel;
-            output << " rssi=" << std::setprecision(1) << metrics.rssi_dbfs << "dBFS"
-                   << " snr=" << metrics.snr_db << "dB fcs=ok\n";
-            output.flush();
+                line << " channel=" << info.channel;
+            line << " rssi=" << std::setprecision(1) << metrics.rssi_dbfs << "dBFS"
+                   << " snr=" << metrics.snr_db << "dB fcs=ok";
+            if (screen_) {
+                std::string key;
+                if (info.type == 0 && (info.subtype == 5 || info.subtype == 8)
+                    && !info.bssid.empty())
+                    key = "ap|" + info.bssid;
+                else
+                    key = std::string(subtype_name(info.type, info.subtype)) + "|"
+                        + info.source + "|" + info.destination + "|" + info.bssid;
+                screen_->update(key, line.str());
+            } else {
+                output << line.str() << '\n';
+                output.flush();
+            }
             return;
         }
         output << std::fixed << std::setprecision(6)
@@ -1413,6 +1438,7 @@ private:
     bool compact_;
     bool verbose_;
     CsiWriter *csi_;
+    birria_tui::Screen *screen_;
     std::vector<int> data_bins_;
     std::vector<std::complex<float>> samples_;
     std::complex<float> pending_{};
@@ -1442,8 +1468,9 @@ private:
 
 class NativeWifiContext {
 public:
-    NativeWifiContext(const Options &options, CsiWriter *csi)
-        : options_(options), csi_(csi), settle_samples_(options.sample_rate / 10),
+    NativeWifiContext(const Options &options, CsiWriter *csi,
+                      birria_tui::Screen *screen)
+        : options_(options), csi_(csi), screen_(screen), settle_samples_(options.sample_rate / 10),
           software_dwell_samples_(static_cast<uint64_t>(options.sample_rate)
                                   * options.dwell_ms / 1000),
           worker_(&NativeWifiContext::worker_loop, this)
@@ -1460,11 +1487,15 @@ public:
     static void gap(const birriasdr_recovery_event *event, uint64_t frequency,
                     uint64_t epoch, void *context)
     {
-        (void)context;
-        std::cerr << "Native stream gap before sample " << event->next_sample
-                  << ", epoch " << epoch << ", center " << frequency
-                  << " Hz, attempt " << event->attempt << ": "
-                  << birriasdr_strerror(event->error) << '\n';
+        NativeWifiContext *native = static_cast<NativeWifiContext *>(context);
+        std::ostringstream message;
+        message << "Gap before sample " << event->next_sample << ", epoch " << epoch
+                << ", center " << frequency << " Hz: "
+                << birriasdr_strerror(event->error);
+        if (native->screen_)
+            native->screen_->set_status(message.str());
+        else
+            std::cerr << message.str() << '\n';
     }
 
     bool dropped() const { return dropped_samples_ != 0; }
@@ -1481,9 +1512,14 @@ public:
         if (decoder_)
             totals_ += decoder_->stats();
         decoder_.reset();
-        if (dropped_samples_)
-            std::cerr << "Native decoder queue dropped " << dropped_samples_
-                      << " samples.\n";
+        if (dropped_samples_) {
+            std::ostringstream message;
+            message << "Native decoder queue dropped " << dropped_samples_ << " samples.";
+            if (screen_)
+                screen_->set_status(message.str());
+            else
+                std::cerr << message.str() << '\n';
+        }
         return totals_;
     }
 
@@ -1561,7 +1597,8 @@ private:
             decode_frequency = UINT64_C(2412000000)
                 + UINT64_C(5000000) * (software_channel_ - 1);
         return std::make_unique<Decoder>(decode_frequency, input_frequency,
-            options_.sample_rate, input_base, options_.compact, options_.verbose, csi_);
+            options_.sample_rate, input_base, options_.compact, options_.verbose,
+            csi_, screen_);
     }
 
     void feed(const int16_t *iq, uint32_t count, uint64_t first_sample,
@@ -1610,6 +1647,7 @@ private:
 
     const Options &options_;
     CsiWriter *csi_;
+    birria_tui::Screen *screen_;
     uint64_t settle_samples_;
     uint64_t software_dwell_samples_;
     uint64_t software_samples_ = 0;
@@ -1820,20 +1858,40 @@ int main(int argc, char **argv)
         return 1;
     ::signal(SIGINT, handle_signal);
     ::signal(SIGTERM, handle_signal);
+    std::unique_ptr<birria_tui::Screen> screen;
+    if (options.interactive) {
+        if (!birria_tui::Screen::terminal_available()) {
+            std::cerr << "Interactive mode requires a terminal on standard output.\n";
+            return 2;
+        }
+        screen = std::make_unique<birria_tui::Screen>("BirriaSDR Wi-Fi monitor");
+        screen->set_status("Starting capture. Ctrl-C to stop.");
+    }
+    auto show_status = [&](const std::string &message) {
+        if (screen)
+            screen->set_status(message);
+        else
+            std::cerr << message << '\n';
+    };
 
     DecoderStats totals;
     bool input_failed = false;
     std::array<uint8_t, 65536> buffer{};
     if (!options.file.empty()) {
         Decoder decoder(options.center_frequency, options.center_frequency,
-                        options.sample_rate, 0, options.compact, options.verbose, &csi);
+                        options.sample_rate, 0, options.compact, options.verbose, &csi,
+                        screen.get());
         FILE *file = std::fopen(options.file.c_str(), "rb");
         if (!file) {
             std::perror("Input file");
             return 1;
         }
-        std::cerr << "Reading " << options.sample_rate
-                  << " S/s little-endian CS16 from " << options.file << ".\n";
+        {
+            std::ostringstream message;
+            message << "Reading " << options.sample_rate
+                    << " S/s little-endian CS16 from " << options.file << '.';
+            show_status(message.str());
+        }
         while (!interrupted) {
             size_t count = std::fread(buffer.data(), 1, buffer.size(), file);
             if (count)
@@ -1858,13 +1916,18 @@ int main(int argc, char **argv)
         totals = decoder.stats();
     } else if (options.udp) {
         Decoder decoder(options.center_frequency, options.center_frequency,
-                        options.sample_rate, 0, options.compact, options.verbose, &csi);
+                        options.sample_rate, 0, options.compact, options.verbose, &csi,
+                        screen.get());
         int fd = open_udp_receiver(options);
         if (fd < 0)
             return 1;
-        std::cerr << "Listening for " << options.sample_rate
-                  << " S/s little-endian CS16 on " << options.bind << ':' << options.port
-                  << ". Legacy 20 MHz OFDM only.\n";
+        {
+            std::ostringstream message;
+            message << "Listening for " << options.sample_rate
+                    << " S/s little-endian CS16 on " << options.bind << ':' << options.port
+                    << ". Legacy 20 MHz OFDM only.";
+            show_status(message.str());
+        }
         while (!interrupted) {
             ssize_t count = recv(fd, buffer.data(), buffer.size(), 0);
             if (count > 0)
@@ -1878,7 +1941,8 @@ int main(int argc, char **argv)
         close(fd);
         totals = decoder.stats();
     } else {
-        birria_native::print_rate_warning(options.sample_rate);
+        if (!options.interactive)
+            birria_native::print_rate_warning(options.sample_rate);
         std::vector<uint64_t> frequencies;
         if (options.sweep && options.sample_rate == 40000000u) {
             for (unsigned channel = 1; channel <= 13; ++channel)
@@ -1889,23 +1953,29 @@ int main(int argc, char **argv)
             frequencies.push_back(options.frequency_set
                 ? options.center_frequency : DEFAULT_NATIVE_FREQUENCY);
         }
-        std::cerr << "Opening native USB device " << options.device_index
-                  << " at " << options.sample_rate << " S/s";
-        if (options.sweep && options.sample_rate == 40000000u)
-            std::cerr << ", RF-sweeping Wi-Fi channels 1 through 13 every "
-                      << options.dwell_ms << " ms";
-        else if (options.sweep)
-            std::cerr << ", software-sweeping Wi-Fi channels 1 through 13 in one "
-                      << "wide capture every " << options.dwell_ms << " ms";
-        else
-            std::cerr << ", center " << frequencies.front() << " Hz";
-        std::cerr << ".\n";
-        NativeWifiContext context(options, &csi);
+        {
+            std::ostringstream message;
+            message << "Native USB device " << options.device_index
+                    << " at " << options.sample_rate << " S/s";
+            if (options.sweep && options.sample_rate == 40000000u)
+                message << ", RF-sweeping Wi-Fi channels 1 through 13 every "
+                        << options.dwell_ms << " ms";
+            else if (options.sweep)
+                message << ", software-sweeping Wi-Fi channels 1 through 13 every "
+                        << options.dwell_ms << " ms";
+            else
+                message << ", center " << frequencies.front() << " Hz";
+            if (options.sample_rate != 40000000u)
+                message << " (experimental rate)";
+            show_status(message.str());
+        }
+        NativeWifiContext context(options, &csi, screen.get());
         birria_native::Options native_options;
         native_options.device_index = options.device_index;
         native_options.sample_rate = options.sample_rate;
         native_options.recovery_restarts = options.recovery_restarts;
         native_options.manual_gain = options.manual_gain;
+        native_options.quiet = options.interactive;
         birria_native::Callbacks callbacks;
         callbacks.samples = NativeWifiContext::samples;
         callbacks.gap = NativeWifiContext::gap;
@@ -1915,15 +1985,19 @@ int main(int argc, char **argv)
         birria_native::Result result = session.run();
         totals = context.finish();
         bool decoder_dropped = context.dropped();
-        std::cerr << "Native stream=" << birriasdr_strerror(result.stream_error)
-                  << ", control=" << birriasdr_strerror(result.control_error)
-                  << ", epochs=" << result.epochs
-                  << ", firmware state=" << result.stats.firmware_state
-                  << ", stage=" << result.stats.stage
-                  << ", reset=" << birriasdr_strerror(result.stats.reset_error) << '\n';
+        if (!options.interactive) {
+            std::cerr << "Native stream=" << birriasdr_strerror(result.stream_error)
+                      << ", control=" << birriasdr_strerror(result.control_error)
+                      << ", epochs=" << result.epochs
+                      << ", firmware state=" << result.stats.firmware_state
+                      << ", stage=" << result.stats.stage
+                      << ", reset=" << birriasdr_strerror(result.stats.reset_error) << '\n';
+        }
         input_failed = result.stream_error || result.control_error || result.close_error
             || decoder_dropped;
     }
+    if (screen)
+        screen.reset();
     std::cerr << "Input samples=" << totals.input_samples
               << ", preamble candidates=" << totals.preamble_candidates
               << ", LTF rejections=" << totals.ltf_rejections

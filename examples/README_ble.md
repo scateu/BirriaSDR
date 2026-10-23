@@ -187,6 +187,22 @@ The compact record retains timing, channel, PDU type, principal addresses,
 local name when present, manufacturer identifier, Apple and Find My markers,
 signal power and CRC state.
 
+The interactive mode opens an ANSI terminal screen:
+
+```sh
+./build/birria_ble --sweep --interactive --manual
+```
+
+The screen combines repeated packets into one row. Advertisements use the
+principal device address as their key. Scan and connection requests use their
+address pair. Each row shows a count, a continuously updated `LAST SEEN` age and
+the most recent compact details. Rows are ordered by recency, and the table is
+limited to the terminal height. The display retains at most 2,048 unique rows.
+
+The compact and interactive options are mutually exclusive. Interactive mode
+cannot be combined with rejected-packet diagnostics from `--verbose` and
+requires standard output to be a terminal.
+
 ## Command line options
 
 Run the help command for the current option summary:
@@ -211,6 +227,7 @@ Run the help command for the current option summary:
 | `--dwell-ms MS` | `1000` | Selects the sweep dwell per advertising channel |
 | `--include-invalid` | Disabled | Prints access address hits whose decoded CRC is invalid |
 | `--compact` | Disabled | Prints one compact line without raw payload expansion |
+| `--interactive` | Disabled | Shows a deduplicated live terminal table with count and last-seen age |
 | `--verbose` | Disabled | Prints rejected candidate diagnostics |
 | `--self-test` | Disabled | Runs the offline PHY and parser test |
 | `--help` | Not applicable | Prints the option summary and exits |

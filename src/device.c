@@ -187,8 +187,8 @@ uint64_t birriasdr_get_center_freq(const birriasdr_dev_t *dev)
     return dev ? atomic_load(&dev->frequency) : 0;
 }
 
-/* Capture-clock programming for higher rates is deliberately not inferred from
- * the earlier vendor-firmware experiments. No host decimator is hidden here.
+/* The backend validates and applies each native rate. No host decimator is
+ * hidden here, and a staged rate takes effect at the next acquisition.
  */
 int birriasdr_set_sample_rate(birriasdr_dev_t *dev, uint32_t rate)
 {

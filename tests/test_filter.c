@@ -67,13 +67,18 @@ int mt_rf_update(birriasdr_dev_t *dev, unsigned port, uint32_t address,
 }
 
 /* Seed unrelated bits differently in both banks to catch accidental clobbers. */
-static void initialize(struct model *model, birriasdr_dev_t *dev)
+static void initialize_rate(struct model *model, birriasdr_dev_t *dev, uint32_t rate)
 {
     memset(model, 0, sizeof(*model));
     memset(dev, 0, sizeof(*dev));
     memcpy(model->value, baseline, sizeof(baseline));
-    dev->rate = 40000000;
+    dev->rate = rate;
     dev->io = (struct bs_io){model, read_word, write_word};
+}
+
+static void initialize(struct model *model, birriasdr_dev_t *dev)
+{
+    initialize_rate(model, dev, 40000000);
 }
 
 int main(void)
@@ -92,6 +97,22 @@ int main(void)
     for (unsigned i = 0; i < 4; ++i) model.value[i] ^= 1;
     CHECK(mt_restore_filter(&dev) == 0 && !dev.mt7921.filter_saved);
     for (unsigned i = 0; i < 4; ++i) CHECK(model.value[i] == (baseline[i] ^ 1));
+
+    initialize_rate(&model, &dev, 80000000);
+    CHECK(mt_configure_filter(&dev) == 0);
+    CHECK((model.value[0] & 0xc0000000) == 0x80000000);
+    CHECK((model.value[1] & 0xc0000000) == 0x80000000);
+    CHECK((model.value[2] & 0x0f000000) == 0x02000000);
+    CHECK((model.value[3] & 0x0f000000) == 0x02000000);
+    CHECK(mt_restore_filter(&dev) == 0);
+
+    initialize_rate(&model, &dev, 160000000);
+    CHECK(mt_configure_filter(&dev) == 0);
+    CHECK((model.value[0] & 0xc0000000) == 0xc0000000);
+    CHECK((model.value[1] & 0xc0000000) == 0xc0000000);
+    CHECK((model.value[2] & 0x0f000000) == 0x03000000);
+    CHECK((model.value[3] & 0x0f000000) == 0x03000000);
+    CHECK(mt_restore_filter(&dev) == 0);
 
     for (unsigned failure = 1; failure <= successful_operations; ++failure) {
         initialize(&model, &dev);

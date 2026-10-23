@@ -236,8 +236,16 @@ static void test_api(void)
     dev.min_frequency = 0;
     CHECK(birriasdr_get_tuning_range(&dev, &minimum, &maximum) == 0);
     CHECK(minimum == UINT64_C(2156000000));
+    CHECK(mt_sample_rate_supported(40000000) && mt_sample_rate_profile(40000000) == 1);
+    CHECK(mt_sample_rate_supported(80000000) && mt_sample_rate_profile(80000000) == 2);
+    CHECK(mt_sample_rate_supported(160000000) && mt_sample_rate_profile(160000000) == 3);
+    CHECK(!mt_sample_rate_supported(20000000));
     CHECK(birriasdr_set_sample_rate(&dev, 0) == BIRRIASDR_ERROR_UNSUPPORTED);
-    CHECK(birriasdr_set_sample_rate(&dev, 80000000) == BIRRIASDR_ERROR_UNSUPPORTED);
+    CHECK(birriasdr_set_sample_rate(&dev, 80000000) == 0);
+    CHECK(birriasdr_get_sample_rate(&dev) == 80000000);
+    CHECK(birriasdr_set_sample_rate(&dev, 160000000) == 0);
+    CHECK(birriasdr_get_sample_rate(&dev) == 160000000);
+    CHECK(birriasdr_set_sample_rate(&dev, 40000000) == 0);
     CHECK(birriasdr_get_sample_rate(&dev) == 40000000);
     CHECK(birriasdr_set_gain_codes(&dev, &gain) == BIRRIASDR_ERROR_STATE);
     CHECK(birriasdr_set_tuner_gain_mode(&dev, 1) == 0);

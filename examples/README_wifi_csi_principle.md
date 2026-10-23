@@ -83,15 +83,17 @@ These samples preserve amplitude and phase. Both are required for a complex chan
 
 A power spectrum alone would not be sufficient because it discards most phase information. Raw complex I/Q retains the complete received OFDM preamble, so CSI can be estimated in host software without enabling a separate chipset CSI-reporting mechanism.
 
-## Converting 40 MSps to the Wi-Fi sample grid
+## Converting native samples to the Wi-Fi sample grid
 
-BirriaSDR produces 40 MSps complex. Legacy 20 MHz OFDM uses a 20 MSps sample grid.
-
-The current decoder averages each adjacent pair of input samples:
+Legacy 20 MHz OFDM uses a 20 MSps sample grid. The decoder accepts native input
+at 40, 80 or 160 MSps and averages groups of two, four or eight samples:
 
 ```text
-y[n] = (x[2n] + x[2n + 1]) / 2
+y[n] = sum(x[D n + i], i = 0 .. D - 1) / D
 ```
+
+The decimation factor `D` is the input rate divided by 20 MSps. A wide 80 MSps
+sweep first translates the selected 20 MHz channel to baseband.
 
 At 20 MSps:
 
@@ -100,9 +102,11 @@ At 20 MSps:
 - The useful symbol duration is 3.2 microseconds.
 - The subcarrier spacing is 312.5 kHz.
 
-The adjacent-pair average is fast, but its frequency response becomes part of every measured CSI vector. It is not a calibrated channelizing filter. A future qualified FIR decimator could provide a better controlled response.
+The moving average is fast, but its frequency response becomes part of every
+measured CSI vector. It is not a calibrated channelizing filter. A future
+qualified polyphase decimator could provide a better controlled response.
 
-Implementation: the `feed_scalar()` method in [`birria_wifi.cpp`](birria_wifi.cpp).
+Implementation: the `feed_sample()` method in [`birria_wifi.cpp`](birria_wifi.cpp).
 
 ## Finding the packet
 

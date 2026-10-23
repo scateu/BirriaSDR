@@ -1,6 +1,11 @@
 # BirriaSDR command line examples
 
-The example programs exercise `libbirriasdr` without adding a graphical interface or a device specific plugin. The [recorder](birria_rx.c) writes a finite or continuous CS16 file. The [UDP sender](birria_udp.c) sends the same samples to the Network source in SDR++. The [Wi-Fi decoder](birria_wifi.cpp) receives that UDP stream and decodes valid legacy OFDM MAC frames.
+The example programs exercise `libbirriasdr` without adding a graphical
+interface or a device specific plugin. The [recorder](birria_rx.c) writes a
+finite or continuous CS16 file. The [UDP sender](birria_udp.c) sends the same
+samples to the Network source in SDR++. The [Wi-Fi decoder](birria_wifi.cpp)
+and [Bluetooth LE scanner](birria_ble.cpp) open native USB capture by default.
+They can also consume recorder files or the optional raw UDP stream.
 
 ## Build the examples
 
@@ -11,7 +16,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-The build creates `build/birria_rx`, `build/birria_udp` and `build/birria_wifi`. Run the device list before starting a capture:
+The build creates `build/birria_rx`, `build/birria_udp`, `build/birria_wifi`
+and `build/birria_ble`. Run the device list before starting a capture:
 
 ```sh
 ./build/birria_rx --list
@@ -32,6 +38,9 @@ This command records 16,000,000 complex samples from device 0. The manual argume
 ```sh
 ./build/birria_rx --frequency 2437000000 capture.cs16 16000000 manual
 ```
+
+The recorder accepts `--sample-rate 80000000` for experimental 80 MSps capture
+and `--sample-rate 160000000` for the expected-overrun research mode.
 
 ## Stream samples to SDR++
 
@@ -76,6 +85,7 @@ Run the help command to see the accepted options:
 | `--host HOST` | `127.0.0.1` | Selects the UDP destination address |
 | `--port PORT` | `1234` | Selects a destination port from 1 to 65,535 |
 | `--frequency HZ` | Device default | Selects the receiver center frequency in whole hertz |
+| `--sample-rate RATE` | `40000000` | Selects 40, 80 or 160 MSps |
 | `--device INDEX` | `0` | Selects a device from the `birria_rx --list` output |
 | `--packet-samples COUNT` | `2048` | Selects 1 to 16,376 complex samples per datagram |
 | `--recovery COUNT` | `3` | Selects the bounded full restart budget, and zero disables recovery |
@@ -107,7 +117,7 @@ The following command sends to another host and disables automatic recovery:
 | Property | Value |
 | --- | --- |
 | Transport | Connected UDP sender with nonblocking writes |
-| Sample rate | 40 MSps complex, fixed |
+| Sample rate | 40 MSps by default, experimental 80 and 160 MSps |
 | Sample layout | Interleaved signed 16-bit I, Q pairs |
 | Source range | −8192 to 8191 for each unshifted 14-bit component |
 | Byte order | Little-endian |
@@ -115,9 +125,9 @@ The following command sends to another host and disables automatic recovery:
 | Maximum payload | 16,376 complex samples, 65,504 bytes |
 | Metadata | None |
 | Return control | None |
-| Payload rate | 160 MB/s, or 1.28 Gbit/s before network overhead |
+| Payload rate | 160 MB/s at 40 MSps, 320 MB/s at 80 MSps and 640 MB/s at 160 MSps |
 
-The default destination is the local host because a one gigabit network cannot carry the sample payload. Remote streaming needs a faster link, enough sender and receiver socket buffering and an MTU appropriate for the selected datagram size. The default 8,192-byte payload requires IP fragmentation on a standard 1,500-byte Ethernet MTU.
+The default destination is the local host because a one gigabit network cannot carry even the 40 MSps sample payload. Remote streaming needs a faster link, enough sender and receiver socket buffering and an MTU appropriate for the selected datagram size. The default 8,192-byte payload requires IP fragmentation on a standard 1,500-byte Ethernet MTU.
 
 The samples remain unshifted so the UDP output matches recorder files and library callbacks. Their peak hardware range occupies about one quarter of the signed 16-bit numeric range. The SDR++ application can therefore show a dBFS reference about 12 dB below a source that fills all 16 bits, but the transport does not discard sample bits.
 
@@ -135,7 +145,17 @@ The library supports live hardware tuning, but this raw UDP example has no retur
 
 ## Decode legacy Wi-Fi frames
 
-The `birria_wifi` example receives the raw UDP stream or a recorder file, decodes valid legacy 20 MHz OFDM frames and prints MAC addresses and beacon information. It can also export 52-subcarrier complex CSI as binary records or JSON Lines. The decoder is standalone and uses no external DSP library. See the [complete Wi-Fi decoder guide](README_wifi.md) for setup, CSI formats, output fields, the signal-processing pipeline, supported rates, limitations and troubleshooting.
+The `birria_wifi` example opens native USB capture by default, decodes valid legacy 20 MHz OFDM frames and prints MAC addresses and beacon information. It can sweep channels 1 through 13, consume UDP or recorder files and export 52-subcarrier complex CSI. See the [complete Wi-Fi decoder guide](README_wifi.md) for setup, CSI formats, output fields, the signal-processing pipeline, supported rates, limitations and troubleshooting.
+
+## Scan Bluetooth LE advertisements
+
+The `birria_ble` example opens native USB capture by default and can sweep
+primary advertising channels 37, 38 and 39. It also accepts UDP or recorder
+files, decodes LE 1M packets, validates
+the Bluetooth CRC and prints packet fields and advertising data to standard
+output. The parser marks the Apple Find My format used by AirTag and compatible
+accessories as a candidate. See the [complete Bluetooth LE scanner guide](README_ble.md)
+for tuning, output fields, supported packets and limitations.
 
 ## Recovery, loss and shutdown
 

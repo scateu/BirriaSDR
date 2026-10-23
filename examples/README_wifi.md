@@ -1,27 +1,26 @@
 # Decode Wi-Fi frames from BirriaSDR I/Q
 
-The `birria_wifi` example is a standalone receiver for legacy 20 MHz IEEE 802.11 OFDM frames inside the 40 MSps BirriaSDR stream. It accepts raw CS16 over UDP or from a recorder file, validates each decoded frame with IEEE CRC32 and prints MAC information to standard output.
+The `birria_wifi` example decodes legacy 20 MHz IEEE 802.11 OFDM frames. Native
+USB capture is the default. The decoder can also read a recorder file or receive
+little-endian CS16 over UDP.
 
-The decoder uses only the C++ standard library and operating system socket APIs. It does not link to `libbirriasdr` or an external DSP library, so it can run on a different computer from the USB receiver.
+The decoder links to `libbirriasdr` for native capture and uses no external DSP
+library. It validates each decoded frame with IEEE CRC32 and prints MAC
+information to standard output.
 
 > [!IMPORTANT]
 >
-> Receive wireless traffic only where local law and your authorization permit it. Management and control frames can expose network names and device addresses even when data payloads are encrypted.
+> Receive wireless traffic only where local law and your authorization permit
+> it. Management and control frames can expose network names and device
+> addresses even when data payloads are encrypted.
 
-## Build the decoder
+## Build and test the decoder
 
 Build from the repository root:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j --target birria_wifi birria_udp
-```
-
-The build creates `build/birria_wifi`. The decoder does not open the dongle, so it does not need libusb permissions at runtime. The project still needs libusb during configuration because the same build also defines `libbirriasdr` and the hardware examples.
-
-Run the built-in coding and MAC parser test before using live samples:
-
-```sh
+cmake --build build -j --target birria_wifi birria_udp birria_rx
 ./build/birria_wifi --self-test
 ```
 
@@ -31,34 +30,91 @@ A successful test prints:
 Wi-Fi decoder self-test passed
 ```
 
-## Decode a live UDP stream
+## Capture directly from USB
 
-Start the decoder before the UDP sender. This lets the receiving socket bind before the first I/Q datagram arrives.
+The default command opens native device 0 at 40 MSps and tunes to Wi-Fi channel
+6 at 2,437 MHz:
 
-Use port `1235` when SDR++ already uses the default UDP port `1234`:
+```sh
+./build/birria_wifi
+```
+
+Select another center or device when needed:
 
 ```sh
 ./build/birria_wifi \
-    --bind 127.0.0.1 \
-    --port 1235 \
-    --frequency 2437000000
+    --device 1 \
+    --frequency 2412000000 \
+    --manual
 ```
 
-Start the sender in another terminal with the same destination port and center frequency:
+The manual option applies LNA 2, filter stage 8 and digital 0. Decoder work runs
+on a separate worker so packet processing does not block USB delivery. A decoder
+queue overflow is reported as an error rather than hidden.
+
+## Sweep the 2.4 GHz Wi-Fi channels
+
+The sweep mode monitors channel centers 1 through 13:
+
+```sh
+./build/birria_wifi \
+    --sweep \
+    --dwell-ms 500 \
+    --manual
+```
+
+The default 40 MSps mode live-retunes through the thirteen centers. The decoder
+discards a settling interval after each retune and starts a new configuration
+epoch.
+
+The experimental 80 MSps mode keeps one wide capture centered at 2,442 MHz. It
+software-sweeps the thirteen 20 MHz channel centers without RF retuning:
+
+```sh
+./build/birria_wifi \
+    --sample-rate 80000000 \
+    --sweep \
+    --dwell-ms 200 \
+    --manual
+```
+
+The 80 MSps mode requires about 320 MB/s of CS16 payload. It decoded valid
+legacy OFDM frames during native testing on October 23, 2026, but it remains
+experimental and its wide passband is not calibrated.
+
+The optional 160 MSps mode prints a warning and disables recovery. The current
+CS16 USB exporter is expected to overrun, so the first overrun stops the run:
+
+```sh
+./build/birria_wifi --sample-rate 160000000 --sweep --manual
+```
+
+## Receive UDP optionally
+
+Start the decoder before the UDP sender:
+
+```sh
+./build/birria_wifi \
+    --udp \
+    --bind 127.0.0.1 \
+    --port 1235 \
+    --frequency 2437000000 \
+    --sample-rate 40000000
+```
+
+Start the matching sender in another terminal:
 
 ```sh
 ./build/birria_udp \
     --host 127.0.0.1 \
     --port 1235 \
     --frequency 2437000000 \
+    --sample-rate 40000000 \
     --manual
 ```
 
-The `--frequency` option on `birria_wifi` labels output only. It does not tune hardware or send a command to `birria_udp`. The hardware center comes from the `--frequency` option passed to `birria_udp`.
-
-The desired 20 MHz Wi-Fi channel must be centered in the 40 MSps capture. For example, use 2,437,000,000 Hz for Wi-Fi channel 6. The decoder does not search for channels at other offsets inside the sampled span.
-
-Stop the decoder with Ctrl-C. It prints final counters to standard error before exiting.
+The frequency and sample rate must match. The UDP mode cannot sweep because raw
+datagrams contain no return control, frequency metadata or configuration epoch.
 
 ## Decode a recorder file
 
@@ -67,14 +123,15 @@ The decoder can read a little-endian CS16 file written by `birria_rx`:
 ```sh
 ./build/birria_wifi \
     --file capture.cs16 \
-    --frequency 2437000000
+    --frequency 2437000000 \
+    --sample-rate 40000000
 ```
 
-The file must contain interleaved signed 16-bit I and Q components at 40 MSps complex. The `--frequency` value remains an output label and does not alter the samples.
+The sample rate and center must describe the recording. The file path, UDP mode
+and native USB capture are mutually exclusive.
 
-The file path replaces UDP input. The bind address and port have no effect when `--file` is present.
-
-Do not use the same path for `--file` and `--csi`. The decoder rejects an exact path match to prevent an output file from replacing its own input.
+Do not use the same path for `--file` and `--csi`. The decoder rejects an exact
+path match to prevent an output file from replacing its input.
 
 ## Command line options
 
@@ -86,31 +143,39 @@ Run the help command for the current option summary:
 
 | Option | Default | Purpose and limits |
 | --- | --- | --- |
-| `--bind ADDRESS` | `0.0.0.0` | Selects the local address for the UDP socket |
-| `--port PORT` | `1234` | Selects the local UDP port from 1 to 65,535 |
-| `--file PATH` | Disabled | Reads a continuous little-endian CS16 file instead of UDP |
-| `--frequency HZ` | Not shown | Adds a center-frequency label to decoded frame output |
-| `--csi PATH` | Disabled | Writes versioned CSI records, and `-` selects standard output |
+| `--udp` | Disabled | Selects UDP instead of native USB capture |
+| `--bind ADDRESS` | `0.0.0.0` | Selects the local UDP address |
+| `--port PORT` | `1234` | Selects the local UDP port |
+| `--file PATH` | Disabled | Reads CS16 from a file instead of USB or UDP |
+| `--frequency HZ` | `2437000000` in native mode | Selects native tuning or labels file and UDP input |
+| `--device INDEX` | `0` | Selects the native USB device |
+| `--sample-rate RATE` | `40000000` | Selects 40, 80 or 160 MSps |
+| `--manual` | Disabled | Selects LNA 2, filter stage 8 and digital 0 for native capture |
+| `--recovery COUNT` | `3` | Selects the native full restart budget |
+| `--sweep` | Disabled | Monitors Wi-Fi channel centers 1 through 13 in native mode |
+| `--dwell-ms MS` | `500` | Selects sweep dwell per channel |
+| `--csi PATH` | Disabled | Writes CSI records, and `-` selects standard output |
 | `--csi-format FORMAT` | `binary` | Selects `binary` or `jsonl`, and requires `--csi` |
 | `--csi-invalid` | Disabled | Includes SIGNAL-valid candidates whose MAC FCS failed |
-| `--csi-normalize` | Disabled | Adds a second CSI vector with unit root mean square magnitude |
-| `--verbose` | Disabled | Prints rejected PSDU diagnostics, including FCS mismatches, to standard error |
-| `--self-test` | Disabled | Tests convolutional decoding, CSI estimation and serialization, CRC32 and basic MAC parsing without input samples |
+| `--csi-normalize` | Disabled | Adds a unit-RMS CSI vector |
+| `--verbose` | Disabled | Prints rejected PSDU diagnostics |
+| `--self-test` | Disabled | Tests coding, CSI, CRC and MAC parsing |
 | `--help` | Not applicable | Prints the option summary and exits |
 
-The decoder writes valid frame records to standard output. Startup information, rejection diagnostics and final counters go to standard error. This separation lets another program consume valid records without parsing status messages.
+Native-only options are rejected with UDP and file input. The sweep option is
+native-only and cannot be combined with an explicit frequency.
 
 ## Output
 
 A valid decoded frame produces one summary line. This example came from an existing 40 MSps capture:
 
 ```text
-frame time=0.007555s sample=302184 center=2437000000Hz rate=6Mbps length=14 type=control subtype=cts dst=e0:3e:44:08:34:da cfo=-13670.9Hz fcs=ok
+frame time=0.007555s sample=302184 center=2437000000Hz rate=6Mbps length=14 type=control subtype=cts dst=e0:3e:44:08:34:da cfo=-13670.9Hz rssi=-44.6dBFS snr=15.0dB ltf=0.705 fcs=ok
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `time` | Position of the detected long training field, derived from the 40 MSps input sample count |
+| `time` | Position of the detected long training field, derived from the selected native input sample count |
 | `sample` | Input complex-sample index at the detected long training field |
 | `center` | Label supplied through `--frequency`, omitted when no label was supplied |
 | `rate` | Legacy OFDM PHY rate decoded from the SIGNAL field |
@@ -121,9 +186,17 @@ frame time=0.007555s sample=302184 center=2437000000Hz rate=6Mbps length=14 type
 | `src` | Source or transmitter address when the frame format carries one |
 | `bssid` | Basic service set identifier when the frame format carries one |
 | `cfo` | Estimated carrier-frequency offset in hertz |
+| `rssi` | Uncalibrated long-training power relative to the signed 16-bit numeric range |
+| `snr` | Signal-to-noise estimate from the difference between the two long-training symbols |
+| `ltf` | Minimum normalized correlation score for the two long-training symbols |
 | `fcs` | The value `ok`, because frames with a failed FCS are not printed to standard output |
 
 The decoder maps data-frame addresses according to the To DS and From DS bits. Four-address data frames use address 3 as the destination and address 4 as the source. Control frames expose only the addresses present in their shorter subtype-specific headers.
+
+The `rssi` value is not calibrated in dBm. It is useful for comparisons within a
+capture that keeps the same gain settings. The `snr` value is an estimate from
+the repeated long-training symbols, and interference or channel variation can
+bias it.
 
 ### Beacon and probe response output
 
@@ -149,44 +222,48 @@ The decoder can export 52 active legacy OFDM subcarriers as raw complex CSI, wit
 
 ## Input and transport contract
 
-The UDP input matches the raw output from `birria_udp`:
+Native capture supplies native-endian CS16 directly from `libbirriasdr`. File
+and UDP input use little-endian CS16. Every source must use one of the supported
+native rates:
 
 | Property | Required value |
 | --- | --- |
-| Sample rate | 40 MSps complex |
-| Sample type | Interleaved signed 16-bit I, Q |
-| Byte order | Little-endian |
-| Source range | Normally −8192 to 8191 for each BirriaSDR component |
-| Datagram metadata | None |
-| Datagram alignment | A whole number of four-byte complex samples |
-| Expected channel | One 20 MHz Wi-Fi channel centered at zero frequency offset |
+| Sample rate | 40 MSps by default, or experimental 80 and 160 MSps |
+| Sample type | Interleaved signed 16-bit I and Q |
+| Source range | Normally minus 8192 to 8191 for each BirriaSDR component |
+| UDP metadata | None |
+| UDP datagram alignment | A whole number of four-byte complex samples |
+| Expected channel | One selected 20 MHz channel after native tuning or software translation |
 
-Datagram boundaries have no PHY meaning. The decoder keeps sample-pair state across input blocks and continues its preamble search across datagrams.
+The UDP protocol has no sequence number, timestamp, acknowledgement or tuning
+control. A datagram loss commonly causes a SIGNAL rejection or FCS failure.
+Do not bind SDR++ and `birria_wifi` to the same unicast address and port.
 
-The raw UDP protocol has no sequence number, timestamp or acknowledgement. The decoder cannot identify the exact location or size of a lost datagram. A loss commonly causes a SIGNAL rejection or FCS failure, after which the decoder searches for the next preamble.
-
-Do not bind SDR++ and `birria_wifi` to the same unicast UDP address and port. Socket reuse behavior can deliver each datagram to only one process rather than duplicating it. Use separate `birria_udp` runs, a multicast or fanout tool, or different recorded inputs when both consumers need the same samples.
-
-The 40 MSps CS16 payload is 160 MB/s before UDP and IP overhead. A one gigabit network cannot carry the complete stream. Localhost is the safest initial setup, and remote use requires a faster link, adequate socket buffers and an MTU plan for the sender's datagram size.
+The payload rates are 160 MB/s at 40 MSps, 320 MB/s at 80 MSps and 640 MB/s at
+160 MSps. One gigabit Ethernet cannot carry any native full-rate mode. The
+160 MSps payload also exceeds the current USB transport capability.
 
 ## Decoder pipeline
 
 The implementation in [`birria_wifi.cpp`](birria_wifi.cpp) keeps the signal path self-contained:
 
-1. The input reader converts little-endian CS16 into complex floating-point samples.
-2. The rate converter averages each adjacent pair of 40 MSps samples to form a 20 MSps waveform.
+1. The source supplies native USB, little-endian file or little-endian UDP CS16 samples.
+2. A frequency translator selects the requested channel when a wide software sweep is active, then a rate converter reduces 40, 80 or 160 MSps to 20 MSps.
 3. The packet detector searches for the legacy short training field with a lag-16 autocorrelation and a rolling energy estimate.
 4. The synchronizer correlates against both 64-sample long training symbols and estimates coarse and fine carrier offset.
 5. The channel estimator divides the received long training subcarriers by the known training sequence.
 6. The SIGNAL decoder applies a 64-point FFT, pilot phase correction, BPSK soft decisions, deinterleaving and rate-one-half Viterbi decoding.
-7. The DATA decoder follows the SIGNAL rate and length, applies pilot tracking, QAM soft decisions, deinterleaving, depuncturing and Viterbi decoding.
+7. The DATA decoder follows the SIGNAL rate and length, applies pilot tracking, QAM soft decisions, deinterleaving, depuncturing and Viterbi decoding. The Viterbi traceback selects the best final state because scrambled padding can follow the zero tail bits.
 8. The descrambler finds the seven-bit initial scrambler state from the zero SERVICE prefix.
 9. The frame checker compares the received FCS with IEEE CRC32 before exposing MAC information.
 10. The MAC parser labels frame type, subtype and addresses, then parses selected beacon and probe-response fields.
 
 The 64-point FFT is implemented in the example. The convolutional decoder uses the standard constraint-length-seven code with octal generators `133` and `171`. The supported puncturing patterns cover every legacy OFDM rate.
 
-The adjacent-pair average is a small and fast conversion for a centered 20 MHz channel. It is not a general channelizer, and it does not move an offset channel to baseband. A future decoder that searches the full 40 MHz span would need frequency translation and a qualified decimation filter for each candidate channel.
+The current rate converter uses a moving average with factors two, four or
+eight. The wide 80 MSps sweep adds frequency translation before this conversion.
+The converter is fast but is not a qualified polyphase channelizer. Adjacent
+channel rejection and amplitude flatness remain experimental.
 
 ## Supported PHY modes
 
@@ -210,12 +287,12 @@ The decoder is an experimental visibility tool rather than a complete IEEE 802.1
 - The decoder handles legacy 20 MHz OFDM frames only.
 - The decoder does not handle the 1, 2, 5.5 or 11 Mbps DSSS and CCK PHY modes. Many 2.4 GHz access points transmit beacons at one of these basic rates, so those beacons do not appear.
 - The decoder does not decode HT, VHT, HE or EHT payloads. Their legacy compatibility fields can still produce rejected candidates.
-- The decoder does not search other 20 MHz channel centers within the 40 MHz capture.
+- The fixed-center mode decodes one 20 MHz channel. Native sweep mode searches channel centers 1 through 13 over time.
 - The decoder uses one receive stream and does not perform MIMO processing, beamforming recovery or antenna combining.
 - The decoder performs pilot common-phase tracking but no full per-symbol channel tracking.
 - The decoder prints metadata and addresses but does not decrypt protected data frames or interpret higher-layer payloads.
-- The decoder has no UDP reorder buffer, loss concealment or source timestamp.
-- The decoder does not identify the RF channel from the samples. The `--frequency` argument is only a label.
+- The decoder has no UDP reorder buffer, loss concealment or source timestamp. Native sweep epochs provide local frequency labels but not a hardware timestamp.
+- File and UDP input rely on the supplied frequency label. Native capture controls the receiver center directly.
 
 A missing beacon is therefore not evidence that an access point is absent. The beacon may use DSSS or CCK, lie on another channel, arrive below the decoding threshold or fail because samples were lost.
 
@@ -227,7 +304,19 @@ The self-test covers the constraint-length-seven convolutional decoder, a synthe
 ctest --test-dir build -R wifi_decoder_self_test --output-on-failure
 ```
 
-The decoder was also exercised against a 64 MB recording containing 16,000,000 complex samples. On the development Apple Silicon Mac, it processed the 0.4-second recording in about 0.4 seconds and printed a valid 6 Mbps CTS frame with a correct FCS. A localhost UDP replay of the same prefix decoded the same frame. These observations establish that the current implementation can decode at least that captured legacy control frame, not that every supported rate or frame subtype has been qualified over the air.
+The decoder was exercised with a connected generic-ID MT7961 and MT7972
+dongle on October 23, 2026. A half-second channel 1 recording produced seven
+valid legacy OFDM frames, including beacons, probe responses and an RTS frame.
+A half-second channel 6 recording produced two valid 12 Mbps action frames. A
+live localhost UDP run decoded beacons, probe responses, acknowledgements and a
+12 Mbps block acknowledgment without source gaps or local UDP drops. These
+observations qualify live 6 Mbps and 12 Mbps decoding on that setup. They do not
+qualify every supported rate or frame subtype.
+
+The final status line separates short-training candidates, long-training
+rejections, SIGNAL rejections, valid SIGNAL headers, DATA decoding rejections,
+valid frames and FCS failures. These counters show which receiver stage rejected
+samples when no frame reaches standard output.
 
 The complete project test suite includes the decoder self-test:
 
@@ -262,7 +351,8 @@ The first command labels decoded records. The second command tunes the hardware.
 
 ### Recorded input produces no output
 
-Confirm that the file is raw little-endian CS16 at 40 MSps complex rather than WAV, CF32 or another container. Confirm that the file starts on a complete I,Q pair and contains the centered channel of interest.
+Confirm that the file is raw little-endian CS16 at the sample rate passed through
+`--sample-rate`, rather than WAV, CF32 or another container. Confirm that the file starts on a complete I,Q pair and contains the centered channel of interest.
 
 ### UDP reception stops or loses many frames
 

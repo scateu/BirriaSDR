@@ -12,12 +12,13 @@
  * This module selects the capture tap and clocks; mt7921_rf.c makes that tap
  * receive an external signal. Tap 4 is selected in 0x830ad448[11:8] and uses
  * logical chain 0 (physical RF SPI 1). This is not an antenna-switch control.
- * The backend uses the channel-6 anchor at 40 MSps complex and exposes an
- * low-band retuning interval without changing the capture clocks.
+ * The backend uses the channel-6 anchor and exposes a low-band retuning
+ * interval without changing the selected capture clock during a read.
  *
  * ICAP control is 0x80021090, its start/end offsets are 0x80021098/0x8002109c,
  * and its producer pointer is 0x800210b4. The 256 KiB ring at byte address
- * 0xe0200000 holds 65,536 complex samples: only 1.6384 ms at 40 MSps. Samples
+ * 0xe0200000 holds 65,536 complex samples, or 1.6384 ms at 40 MSps, 0.8192 ms
+ * at 80 MSps and 0.4096 ms at 160 MSps. Samples
  * occupy four bytes each, little-endian Q then I in 16-bit slots with 14 valid
  * bits per component. Four consecutive complex samples fill 16 bytes without
  * inter-sample padding. Address units must not be confused with byte offsets.
@@ -52,8 +53,8 @@
 /* ICAP writes consecutive raw14 Q,I pairs into a 256 KiB circular SRAM.
  * The original MCU program later watches its producer pointer and submits
  * serial DMA descriptors referencing that SRAM directly. This host setup
- * selects receive-only MAC clocks, the chain-0 tap and the dense 40 MSps mode;
- * it leaves capture stopped until bulk-IN requests have been queued.
+ * selects receive-only MAC clocks, the chain-0 tap and the dense native-rate
+ * mode; it leaves capture stopped until bulk-IN requests have been queued.
  */
 int mt_configure_capture(birriasdr_dev_t *dev)
 {
@@ -76,7 +77,10 @@ int mt_configure_capture(birriasdr_dev_t *dev)
     BS_TRY(bs_write32(dev, BS_MMIO, 0x8002109c, 0xfffc));
     BS_TRY(bs_update32(dev, BS_MMIO, 0x800210b8, 0xf0000, 0x9c000000));
     BS_TRY(bs_update32(dev, BS_MMIO, 0x830ad440, 0xff, 0x80000013));
-    BS_TRY(bs_update32(dev, BS_MMIO, 0x830ad448, 0x0fffffff, 0x008c0400));
+    unsigned profile = mt_sample_rate_profile(dev->rate);
+    uint32_t divider = 4u - profile;
+    uint32_t capture = UINT32_C(0x00800400) | divider << 18;
+    BS_TRY(bs_update32(dev, BS_MMIO, 0x830ad448, 0x0fffffff, capture));
     BS_TRY(bs_update32(dev, BS_MMIO, 0x88009004, 0, 0x0f000000));
     return bs_write32(dev, BS_MMIO, 0x80021090, 0x4f1);
 }
@@ -116,7 +120,8 @@ static int validate(uint64_t frequency, uint32_t rate, const struct birriasdr_ga
 {
     if (gain->lna > 3 || gain->lpf > 8 || gain->digital > 12)
         return BIRRIASDR_ERROR_INVALID;
-    if (frequency < MT_RF_MIN_HZ || frequency > MT_RF_MAX_HZ || rate != 40000000)
+    if (frequency < MT_RF_MIN_HZ || frequency > MT_RF_MAX_HZ ||
+        !mt_sample_rate_supported(rate))
         return BIRRIASDR_ERROR_UNSUPPORTED;
     return 0;
 }

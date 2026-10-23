@@ -42,6 +42,7 @@ struct options {
     const char *host;
     const char *port;
     uint64_t frequency;
+    uint32_t sample_rate;
     uint32_t device_index;
     uint32_t packet_samples;
     uint32_t recovery_restarts;
@@ -55,11 +56,13 @@ static void usage(FILE *file, const char *program)
             "  --host HOST             UDP destination (default " DEFAULT_HOST ")\n"
             "  --port PORT             UDP destination port (default " DEFAULT_PORT ")\n"
             "  --frequency HZ          Center frequency for the receiver\n"
+            "  --sample-rate RATE      40000000, 80000000 or 160000000\n"
             "  --device INDEX          Device index (default 0)\n"
             "  --packet-samples COUNT  Complex samples per datagram (default 2048, max 16376)\n"
             "  --recovery COUNT        Full stream restart budget (default 3, 0 disables)\n"
             "  --manual                Use gain codes LNA 2, filter 8, digital 0\n"
-            "  --help                  Show this help\n",
+            "  --help                  Show this help\n"
+            "The 80 MSps mode is experimental. The 160 MSps CS16 mode is expected to overrun.\n",
             program);
 }
 
@@ -96,7 +99,8 @@ static int parse_options(int argc, char **argv, struct options *options)
         .host = DEFAULT_HOST,
         .port = DEFAULT_PORT,
         .packet_samples = DEFAULT_PACKET_SAMPLES,
-        .recovery_restarts = DEFAULT_RECOVERY_RESTARTS
+        .recovery_restarts = DEFAULT_RECOVERY_RESTARTS,
+        .sample_rate = 40000000u
     };
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--help"))
@@ -120,6 +124,14 @@ static int parse_options(int argc, char **argv, struct options *options)
             if (take_value(argc, argv, &i, &value) ||
                 parse_u64(value, UINT64_MAX, false, &options->frequency))
                 return -1;
+            continue;
+        }
+        if (!strcmp(argv[i], "--sample-rate")) {
+            if (take_value(argc, argv, &i, &value) ||
+                parse_u64(value, UINT32_MAX, false, &number) ||
+                (number != 40000000u && number != 80000000u && number != 160000000u))
+                return -1;
+            options->sample_rate = (uint32_t)number;
             continue;
         }
         if (!strcmp(argv[i], "--device")) {
@@ -301,7 +313,10 @@ int main(int argc, char **argv)
     }
     stream.dev = dev;
 
-    if (options.frequency) {
+    result = birriasdr_set_sample_rate(dev, options.sample_rate);
+    if (result < 0)
+        fprintf(stderr, "Sample rate: %s\n", birriasdr_strerror(result));
+    if (!result && options.frequency) {
         result = birriasdr_set_center_freq(dev, options.frequency);
         if (result < 0)
             fprintf(stderr, "Frequency: %s\n", birriasdr_strerror(result));
@@ -314,6 +329,12 @@ int main(int argc, char **argv)
         if (result < 0)
             fprintf(stderr, "Gain: %s\n", birriasdr_strerror(result));
     }
+    if (!result && options.sample_rate == 80000000u)
+        fprintf(stderr, "WARNING: 80 MSps is experimental and sends about 320 MB/s of CS16.\n");
+    if (!result && options.sample_rate == 160000000u) {
+        fprintf(stderr, "WARNING: 160 MSps is expected to overrun CS16 USB; recovery disabled.\n");
+        options.recovery_restarts = 0;
+    }
     if (!result && options.recovery_restarts) {
         result = birriasdr_set_recovery(dev, options.recovery_restarts,
                                         on_recovery, &stream);
@@ -325,8 +346,8 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
     if (!result) {
         fprintf(stderr,
-                "Sending 40 MSps CS16 to %s:%s in packets of %u samples. Press Ctrl-C to stop.\n",
-                options.host, options.port, options.packet_samples);
+                "Sending %u S/s CS16 to %s:%s in packets of %u samples. Press Ctrl-C to stop.\n",
+                options.sample_rate, options.host, options.port, options.packet_samples);
         result = birriasdr_read_async(dev, send_samples, &stream, 0, 0);
     }
 

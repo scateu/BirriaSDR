@@ -90,16 +90,31 @@ int main(int argc, char **argv)
     struct birriasdr_stream_stats stats;
     struct recorder recorder = {0};
     uint64_t frequency = 0;
+    uint64_t number;
+    uint32_t sample_rate = 40000000u;
     int result, close_result, argument = 1;
     if (argc == 2 && !strcmp(argv[1], "--list"))
         return list_devices();
-    if (argc > 1 && !strcmp(argv[1], "--frequency")) {
-        if (argc < 4 || parse_number(argv[2], &frequency))
-            return 1;
-        argument = 3;
+    while (argument < argc) {
+        if (!strcmp(argv[argument], "--frequency")) {
+            if (argument + 1 >= argc || parse_number(argv[argument + 1], &frequency))
+                return 1;
+            argument += 2;
+            continue;
+        }
+        if (!strcmp(argv[argument], "--sample-rate")) {
+            if (argument + 1 >= argc || parse_number(argv[argument + 1], &number) ||
+                (number != 40000000u && number != 80000000u && number != 160000000u))
+                return 1;
+            sample_rate = (uint32_t)number;
+            argument += 2;
+            continue;
+        }
+        break;
     }
     if (argc - argument < 1 || argc - argument > 3) {
-        fprintf(stderr, "Usage: %s --list | [--frequency Hz] output.cs16 [complex-samples [manual]]\n", argv[0]);
+        fprintf(stderr, "Usage: %s --list | [--frequency Hz] [--sample-rate RATE] "
+                        "output.cs16 [complex-samples [manual]]\n", argv[0]);
         return 1;
     }
     if (argc - argument >= 2 && parse_number(argv[argument + 1], &recorder.limit))
@@ -112,6 +127,16 @@ int main(int argc, char **argv)
         return 1;
     }
     recorder.dev = dev;
+    result = birriasdr_set_sample_rate(dev, sample_rate);
+    if (result < 0) {
+        fprintf(stderr, "Sample rate: %s\n", birriasdr_strerror(result));
+        birriasdr_close(dev);
+        return 1;
+    }
+    if (sample_rate == 80000000u)
+        fprintf(stderr, "WARNING: 80 MSps is experimental and writes about 320 MB/s.\n");
+    else if (sample_rate == 160000000u)
+        fprintf(stderr, "WARNING: 160 MSps is expected to overrun the current CS16 USB path.\n");
     if (frequency) {
         result = birriasdr_set_center_freq(dev, frequency);
         if (result < 0) {
@@ -140,8 +165,8 @@ int main(int argc, char **argv)
     close_result = birriasdr_close(dev);
     if (fclose(recorder.file))
         recorder.error = 1;
-    fprintf(stderr, "Saved %llu complex samples; stream=%s; firmware state=%u; stage=%d; reset=%s\n",
-             (unsigned long long)recorder.count, birriasdr_strerror(result),
+    fprintf(stderr, "Saved %llu complex samples at %u S/s; stream=%s; firmware state=%u; stage=%d; reset=%s\n",
+             (unsigned long long)recorder.count, sample_rate, birriasdr_strerror(result),
              stats.firmware_state, stats.stage, birriasdr_strerror(stats.reset_error));
     return result || close_result || recorder.error ? 1 : 0;
 }

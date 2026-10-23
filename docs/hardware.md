@@ -12,17 +12,22 @@ extension points.
 The RF front end tunes and filters the input. The chip's capture engine writes
 complex samples into internal memory, and our RAM-resident device program
 submits that memory to USB DMA. The host checks the resulting stream and
-delivers I/Q samples to the application. The implemented backend pairs a
-nominal 40 MHz analog filter with the corresponding digital bandwidth class at
-40 MSps complex. The sampled span is 40 MHz, and the
-[filter reference](mt7921.md#filtering) documents the measured rolloff and
-out-of-span rejection. Sample packing, memory layout and register sequences all
+delivers I/Q samples to the application. The implemented backend pairs each
+native sample rate with its analog and digital bandwidth profile. The default is
+40 MSps. The 80 MSps profile is experimental, and the 160 MSps CS16 profile is
+expected to overrun the current USB exporter. The
+[filter reference](mt7921.md#filtering) documents the evidence and limits. Sample packing, memory layout and register sequences all
 belong to the chipset backend.
 
 The device never receives vendor RAM firmware or a ROM patch. The current
 backend relies only on the device's immutable factory ROM and our original
 program. All configuration is volatile, and nothing is written to flash or
 eFuse.
+
+The [wide-band coverage design](wideband.md) records the experimental 80 MSps
+capture result, the 160 MSps transport failure and the proposed sweep and
+SoapySDR integration architecture. The library now exposes 40, 80 and
+160 MSps with the documented qualification levels.
 
 ## Ownership and acquisition
 

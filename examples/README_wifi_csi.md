@@ -2,11 +2,16 @@
 
 The `birria_wifi` decoder can export software-derived SISO channel state information from the legacy long training field of each detected 20 MHz OFDM packet. The exporter writes 52 active complex subcarriers with packet timing, PHY and MAC metadata.
 
-This guide covers CSI collection, record formats, validity, interpretation, calibration limits and verification. The [CSI principle guide](README_wifi_csi_principle.md) explains why the estimate is available from raw I/Q and how packet detection, carrier correction, the L-LTF and FCS establish confidence. The [main Wi-Fi decoder guide](README_wifi.md) covers building the program, UDP input, frame decoding and general troubleshooting.
+This guide covers CSI collection, record formats, validity, interpretation,
+calibration limits and verification. The [CSI principle guide](README_wifi_csi_principle.md)
+explains the estimate. The [main Wi-Fi decoder guide](README_wifi.md) covers
+native USB, UDP and file input, sweep mode and frame decoding.
 
 > [!IMPORTANT]
 >
-> The exported values are receiver channel estimates, not calibrated absolute propagation measurements. They include transmitter response, receiver response, gain, timing, frequency error and the current 40 to 20 MSps conversion.
+> The exported values are receiver channel estimates, not calibrated absolute
+> propagation measurements. They include transmitter response, receiver
+> response, gain, timing, frequency error and the current rate conversion.
 
 ## Build and test
 
@@ -31,42 +36,67 @@ ctest --test-dir build -R wifi_decoder_self_test --output-on-failure
 
 ## Collect live CSI
 
-Start the decoder before the UDP sender. This example writes FCS-valid records to a binary file:
+Native USB capture is the default. This command tunes device 0 to channel 6 at
+40 MSps and writes FCS-valid CSI records:
 
 ```sh
 ./build/birria_wifi \
-    --bind 127.0.0.1 \
-    --port 1235 \
     --frequency 2437000000 \
+    --manual \
     --csi live.bcsi
 ```
 
-Start `birria_udp` in another terminal with the same port and center frequency:
+The sweep mode can export CSI while visiting channels 1 through 13. Every record
+contains the center frequency associated with its decoder epoch:
 
 ```sh
+./build/birria_wifi \
+    --sweep \
+    --dwell-ms 500 \
+    --csi sweep.jsonl \
+    --csi-format jsonl \
+    --manual
+```
+
+The experimental 80 MSps mode software-sweeps the channels inside one wide
+capture. The CSI still represents one selected 20 MHz channel per dwell.
+
+## Collect CSI through UDP
+
+Select UDP explicitly and start the decoder before the sender:
+
+```sh
+./build/birria_wifi \
+    --udp \
+    --bind 127.0.0.1 \
+    --port 1235 \
+    --frequency 2437000000 \
+    --sample-rate 40000000 \
+    --csi live.bcsi
+
 ./build/birria_udp \
     --host 127.0.0.1 \
     --port 1235 \
     --frequency 2437000000 \
+    --sample-rate 40000000 \
     --manual
 ```
 
-The `--frequency` option passed to `birria_wifi` is metadata only. The same option passed to `birria_udp` tunes the hardware. The desired 20 MHz Wi-Fi channel must be centered in the 40 MSps stream.
-
-Use a different port from SDR++ unless a separate fanout mechanism duplicates the datagrams. Two unicast consumers bound to the same port are not a reliable way to receive identical streams.
+Use a different port from SDR++ unless a fanout mechanism duplicates the
+samples. The raw UDP protocol cannot carry sweep epochs.
 
 ## Export CSI from a recording
-
-A recorder file can produce repeatable CSI output without live UDP timing:
 
 ```sh
 ./build/birria_wifi \
     --file capture.cs16 \
     --frequency 2437000000 \
+    --sample-rate 40000000 \
     --csi capture.bcsi
 ```
 
-The input must be continuous little-endian CS16 at 40 MSps complex. Do not use the same path for `--file` and `--csi`.
+The input must be continuous little-endian CS16 at the specified rate. Do not
+use the same path for `--file` and `--csi`.
 
 ## CSI command line options
 
@@ -76,10 +106,13 @@ The input must be continuous little-endian CS16 at 40 MSps complex. Do not use t
 | `--csi-format FORMAT` | `binary` | Selects `binary` or `jsonl` |
 | `--csi-invalid` | Disabled | Includes SIGNAL-valid candidates whose MAC FCS failed |
 | `--csi-normalize` | Disabled | Adds a unit root mean square magnitude vector after the raw vector |
-| `--frequency HZ` | Zero | Labels each record with the receiver center frequency |
-| `--file PATH` | UDP input | Reads CSI source samples from a recorder file |
-| `--bind ADDRESS` | `0.0.0.0` | Selects the live UDP bind address |
-| `--port PORT` | `1234` | Selects the live UDP port |
+| `--frequency HZ` | Channel 6 in native mode | Tunes native capture or labels file and UDP input |
+| `--sample-rate RATE` | `40000000` | Selects the native or input sample rate |
+| `--sweep` | Disabled | Exports CSI while native capture visits channels 1 through 13 |
+| `--file PATH` | Disabled | Reads CSI source samples from a recorder file |
+| `--udp` | Disabled | Selects UDP instead of native USB capture |
+| `--bind ADDRESS` | `0.0.0.0` | Selects the UDP bind address |
+| `--port PORT` | `1234` | Selects the UDP port |
 
 The CSI-specific format and validity options require `--csi`. Frame summaries normally remain on standard output. When `--csi -` selects standard output, frame summaries move to standard error so they cannot corrupt the CSI stream.
 
@@ -139,6 +172,10 @@ The JSON Lines format is larger but convenient for inspection and scripts:
 
 Each line is one JSON object. The `subcarriers` array gives the signed subcarrier indices. The `csi` array contains `[real, imaginary]` pairs in the same order. The optional `csi_normalized` array has the same layout.
 
+The `snr_db` field estimates signal-to-noise ratio from the two repeated
+long-training symbols. It is a packet quality estimate rather than a calibrated
+receiver measurement.
+
 Use `--csi -` to write either CSI format to standard output. Frame summaries move to standard error in that mode so they do not corrupt the CSI stream:
 
 ```sh
@@ -174,7 +211,7 @@ Every binary record is self-delimiting and little-endian. The first version uses
 | `8` | 4 | Total record size in bytes |
 | `12` | 4 | Flags described below |
 | `16` | 8 | CSI record sequence starting at zero |
-| `24` | 8 | Input complex-sample index at 40 MSps |
+| `24` | 8 | Input complex-sample index at the selected input rate |
 | `32` | 8 | Center-frequency label in hertz, or zero |
 | `40` | 4 | Carrier-frequency offset in hertz as float32 |
 | `44` | 4 | Minimum normalized correlation of the two long-training symbols as float32 |
@@ -238,7 +275,7 @@ The raw estimate includes the entire measurement chain:
 Hmeasured[k] = Htransmitter[k] Hpropagation[k] Hreceiver[k]
 ```
 
-The result therefore includes transmitter filtering, propagation, receiver filtering, gain, packet timing and the current adjacent-pair 40 to 20 MSps conversion. It is useful for relative packet-to-packet measurements, but it is not a calibrated absolute propagation channel.
+The result therefore includes transmitter filtering, propagation, receiver filtering, gain, packet timing and the current moving-average native-rate to 20 MSps conversion. It is useful for relative packet-to-packet measurements, but it is not a calibrated absolute propagation channel.
 
 The raw amplitude is in receiver sample units. The normalized vector divides all 52 complex values by their root mean square magnitude. This removes one packet-wide amplitude factor, but it does not remove per-subcarrier receiver response, common phase, linear phase slope or transmitter response.
 

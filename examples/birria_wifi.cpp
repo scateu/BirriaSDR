@@ -8,6 +8,10 @@
 #include <cerrno>
 #include <cmath>
 #include <complex>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,17 +26,19 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <vector>
+#include <memory>
+#include "birria_native.hpp"
 
 namespace {
 
 constexpr double PI = 3.14159265358979323846;
-constexpr double INPUT_RATE = 40000000.0;
 constexpr double WIFI_RATE = 20000000.0;
+constexpr uint64_t DEFAULT_NATIVE_FREQUENCY = UINT64_C(2437000000);
 constexpr size_t FFT_SIZE = 64;
 constexpr size_t DETECT_DELAY = 16;
 constexpr size_t DETECT_WINDOW = 64;
-constexpr size_t DETECT_RUN = 48;
-constexpr float DETECT_THRESHOLD = 0.55f;
+constexpr size_t DETECT_RUN = 96;
+constexpr float DETECT_THRESHOLD = 0.57f;
 constexpr float LTF_THRESHOLD = 0.43f;
 constexpr size_t MAX_PSDU = 4095;
 
@@ -45,6 +51,15 @@ struct Options {
     std::string csi_file;
     std::string csi_format = "binary";
     uint64_t center_frequency = 0;
+    uint32_t sample_rate = 40000000;
+    uint32_t device_index = 0;
+    uint32_t recovery_restarts = 3;
+    uint32_t dwell_ms = 500;
+    bool udp = false;
+    bool manual_gain = false;
+    bool sweep = false;
+    bool frequency_set = false;
+    bool dwell_set = false;
     bool verbose = false;
     bool csi_invalid = false;
     bool csi_normalize = false;
@@ -102,17 +117,26 @@ void usage(const char *program)
 {
     std::cout
         << "Usage: " << program << " [options]\n"
+        << "  --udp                   Receive UDP instead of native USB capture\n"
         << "  --bind ADDRESS          UDP local address (default 0.0.0.0)\n"
         << "  --port PORT             UDP local port (default 1234)\n"
-        << "  --file PATH             Read little-endian CS16 instead of UDP\n"
-        << "  --frequency HZ          Center frequency shown in output\n"
+        << "  --file PATH             Read little-endian CS16 instead of USB or UDP\n"
+        << "  --frequency HZ          Native tuning frequency or input label\n"
+        << "  --device INDEX          Native USB device index (default 0)\n"
+        << "  --sample-rate RATE      40000000, 80000000 or 160000000\n"
+        << "  --manual                Use native gain codes LNA 2, filter 8, digital 0\n"
+        << "  --recovery COUNT        Native restart budget (default 3)\n"
+        << "  --sweep                 Sweep Wi-Fi channels 1 through 13, native only\n"
+        << "  --dwell-ms MS           Sweep dwell per channel (default 500)\n"
         << "  --csi PATH              Write CSI records, or - for standard output\n"
         << "  --csi-format FORMAT     binary or jsonl (default binary)\n"
         << "  --csi-invalid           Include SIGNAL-valid frames with failed FCS\n"
         << "  --csi-normalize         Include an RMS-normalized CSI vector\n"
         << "  --verbose               Print rejected PSDU diagnostics\n"
         << "  --self-test             Test coding, CSI, CRC and MAC parsing\n"
-        << "  --help                  Show this help\n";
+        << "  --help                  Show this help\n"
+        << "Native USB capture is the default. The 80 MSps mode is experimental.\n"
+        << "The 160 MSps mode is experimental and expected to overrun CS16 USB.\n";
 }
 
 bool parse_u64(const char *text, uint64_t maximum, bool allow_zero, uint64_t &value)
@@ -140,6 +164,12 @@ bool parse_options(int argc, char **argv, Options &options)
             std::exit(0);
         } else if (option == "--verbose") {
             options.verbose = true;
+        } else if (option == "--udp") {
+            options.udp = true;
+        } else if (option == "--manual") {
+            options.manual_gain = true;
+        } else if (option == "--sweep") {
+            options.sweep = true;
         } else if (option == "--csi-invalid") {
             options.csi_invalid = true;
         } else if (option == "--csi-normalize") {
@@ -176,6 +206,33 @@ bool parse_options(int argc, char **argv, Options &options)
             const char *arg = value();
             if (!arg || !parse_u64(arg, UINT64_MAX, false, options.center_frequency))
                 return false;
+            options.frequency_set = true;
+        } else if (option == "--device") {
+            const char *arg = value();
+            uint64_t number = 0;
+            if (!arg || !parse_u64(arg, UINT32_MAX, true, number))
+                return false;
+            options.device_index = static_cast<uint32_t>(number);
+        } else if (option == "--sample-rate") {
+            const char *arg = value();
+            uint64_t number = 0;
+            if (!arg || !parse_u64(arg, UINT32_MAX, false, number)
+                || !birria_native::valid_sample_rate(static_cast<uint32_t>(number)))
+                return false;
+            options.sample_rate = static_cast<uint32_t>(number);
+        } else if (option == "--recovery") {
+            const char *arg = value();
+            uint64_t number = 0;
+            if (!arg || !parse_u64(arg, UINT32_MAX, true, number))
+                return false;
+            options.recovery_restarts = static_cast<uint32_t>(number);
+        } else if (option == "--dwell-ms") {
+            const char *arg = value();
+            uint64_t number = 0;
+            if (!arg || !parse_u64(arg, UINT32_MAX, false, number))
+                return false;
+            options.dwell_ms = static_cast<uint32_t>(number);
+            options.dwell_set = true;
         } else {
             return false;
         }
@@ -184,6 +241,15 @@ bool parse_options(int argc, char **argv, Options &options)
         && (options.csi_invalid || options.csi_normalize || options.csi_format != "binary"))
         return false;
     if (!options.file.empty() && options.file == options.csi_file)
+        return false;
+    if (options.udp && !options.file.empty())
+        return false;
+    if (options.sweep && (options.udp || !options.file.empty() || options.frequency_set))
+        return false;
+    if (options.dwell_set && !options.sweep)
+        return false;
+    if ((options.manual_gain || options.device_index || options.recovery_restarts != 3)
+        && (options.udp || !options.file.empty()))
         return false;
     return true;
 }
@@ -450,7 +516,8 @@ FrameInfo parse_frame(const std::vector<uint8_t> &frame)
                 if (offset + length > end)
                     break;
                 if (id == 0)
-                    info.ssid = escaped_text(frame.data() + offset, length);
+                    info.ssid = length ? escaped_text(frame.data() + offset, length)
+                                       : std::string();
                 else if (id == 3 && length == 1)
                     info.channel = frame[offset];
                 offset += length;
@@ -487,6 +554,7 @@ struct CsiRecord {
     uint64_t center_frequency = 0;
     float cfo_hz = 0;
     float ltf_correlation = 0;
+    float snr_db = 0;
     unsigned rate_mbps = 0;
     unsigned psdu_length = 0;
     bool fcs_valid = false;
@@ -686,6 +754,7 @@ private:
                << ",\"center_frequency_hz\":" << record.center_frequency
                << ",\"cfo_hz\":" << record.cfo_hz
                << ",\"ltf_correlation\":" << record.ltf_correlation
+               << ",\"snr_db\":" << record.snr_db
                << ",\"rate_mbps\":" << record.rate_mbps
                << ",\"psdu_length\":" << record.psdu_length
                << ",\"fcs_valid\":" << (record.fcs_valid ? "true" : "false")
@@ -758,11 +827,44 @@ std::array<std::complex<float>, 52> active_csi(
     return output;
 }
 
+struct DecoderStats {
+    uint64_t input_samples = 0;
+    uint64_t preamble_candidates = 0;
+    uint64_t ltf_rejections = 0;
+    uint64_t signal_rejections = 0;
+    uint64_t signal_headers = 0;
+    uint64_t data_rejections = 0;
+    uint64_t frames = 0;
+    uint64_t fcs_failures = 0;
+    uint64_t bad_datagrams = 0;
+
+    DecoderStats &operator+=(const DecoderStats &other)
+    {
+        input_samples += other.input_samples;
+        preamble_candidates += other.preamble_candidates;
+        ltf_rejections += other.ltf_rejections;
+        signal_rejections += other.signal_rejections;
+        signal_headers += other.signal_headers;
+        data_rejections += other.data_rejections;
+        frames += other.frames;
+        fcs_failures += other.fcs_failures;
+        bad_datagrams += other.bad_datagrams;
+        return *this;
+    }
+};
+
 class Decoder {
 public:
-    Decoder(uint64_t center_frequency, bool verbose, CsiWriter *csi)
-        : center_frequency_(center_frequency), verbose_(verbose), csi_(csi)
+    Decoder(uint64_t center_frequency, uint64_t input_center_frequency,
+            uint32_t input_rate, uint64_t input_base, bool verbose, CsiWriter *csi)
+        : center_frequency_(center_frequency), input_rate_(input_rate),
+          input_decimation_(input_rate / static_cast<uint32_t>(WIFI_RATE)),
+          input_base_(input_base), verbose_(verbose), csi_(csi)
     {
+        double offset = static_cast<double>(center_frequency)
+            - static_cast<double>(input_center_frequency);
+        oscillator_step_ = std::polar(1.0f,
+            static_cast<float>(-2.0 * PI * offset / input_rate));
         for (int subcarrier = -26; subcarrier <= 26; ++subcarrier)
             if (subcarrier != 0 && std::find(pilot_bins.begin(), pilot_bins.end(), subcarrier)
                     == pilot_bins.end())
@@ -777,6 +879,13 @@ public:
         }
         for (size_t offset = 0; offset < length; offset += 4)
             feed_scalar(bytes + offset);
+        process();
+    }
+
+    void feed_iq(const int16_t *iq, uint32_t count)
+    {
+        for (uint32_t i = 0; i < count; ++i)
+            feed_sample({static_cast<float>(iq[2 * i]), static_cast<float>(iq[2 * i + 1])});
         process();
     }
 
@@ -808,7 +917,17 @@ public:
     uint64_t bad_datagrams() const { return bad_datagrams_; }
     uint64_t signal_headers() const { return signal_headers_; }
     uint64_t fcs_failures() const { return fcs_failures_; }
+    uint64_t preamble_candidates() const { return preamble_candidates_; }
+    uint64_t ltf_rejections() const { return ltf_rejections_; }
+    uint64_t signal_rejections() const { return signal_rejections_; }
+    uint64_t data_rejections() const { return data_rejections_; }
     uint64_t input_samples() const { return input_pairs_; }
+    size_t trailing_bytes() const { return byte_count_; }
+    DecoderStats stats() const
+    {
+        return {input_pairs_, preamble_candidates_, ltf_rejections_, signal_rejections_,
+                signal_headers_, data_rejections_, frames_, fcs_failures_, bad_datagrams_};
+    }
 
 private:
     enum class DecodeResult { NeedMore, Rejected, Consumed };
@@ -817,14 +936,21 @@ private:
     {
         int16_t i = static_cast<int16_t>(bytes[0] | static_cast<uint16_t>(bytes[1]) << 8);
         int16_t q = static_cast<int16_t>(bytes[2] | static_cast<uint16_t>(bytes[3]) << 8);
-        std::complex<float> sample(i, q);
+        feed_sample({static_cast<float>(i), static_cast<float>(q)});
+    }
+
+    void feed_sample(std::complex<float> sample)
+    {
+        sample *= oscillator_;
+        oscillator_ *= oscillator_step_;
+        if ((input_pairs_ & 4095u) == 4095u)
+            oscillator_ /= std::abs(oscillator_);
         ++input_pairs_;
-        if (have_pending_) {
-            samples_.push_back(0.5f * (pending_ + sample));
-            have_pending_ = false;
-        } else {
-            pending_ = sample;
-            have_pending_ = true;
+        pending_ += sample;
+        if (++pending_count_ == input_decimation_) {
+            samples_.push_back(pending_ / static_cast<float>(input_decimation_));
+            pending_ = {};
+            pending_count_ = 0;
         }
     }
 
@@ -859,6 +985,42 @@ private:
             (std::sqrt(energy * pattern_energy) + 1.0e-12));
     }
 
+    struct SignalMetrics {
+        float rssi_dbfs = 0;
+        float snr_db = 0;
+    };
+
+    SignalMetrics measure_signal(
+        size_t ltf_start,
+        const std::array<std::complex<float>, FFT_SIZE> &first,
+        const std::array<std::complex<float>, FFT_SIZE> &second) const
+    {
+        SignalMetrics metrics;
+        double time_power = 0;
+        for (size_t i = 0; i < FFT_SIZE * 2; ++i)
+            time_power += magnitude_squared(samples_[ltf_start + i]);
+        double mean_power = time_power / (FFT_SIZE * 2);
+        metrics.rssi_dbfs = static_cast<float>(10.0 * std::log10(
+            std::max(mean_power, 1.0e-30) / (32768.0 * 32768.0)));
+
+        double mean_frequency_power = 0;
+        double noise_power = 0;
+        for (int subcarrier = -26; subcarrier <= 26; ++subcarrier) {
+            if (subcarrier == 0)
+                continue;
+            int bin = bin_index(subcarrier);
+            std::complex<float> mean = 0.5f * (first[bin] + second[bin]);
+            std::complex<float> difference = first[bin] - second[bin];
+            mean_frequency_power += magnitude_squared(mean);
+            noise_power += 0.5 * magnitude_squared(difference);
+        }
+        double signal_power = std::max(mean_frequency_power - 0.5 * noise_power,
+                                       1.0e-30);
+        metrics.snr_db = static_cast<float>(10.0 * std::log10(
+            signal_power / std::max(noise_power, 1.0e-30)));
+        return metrics;
+    }
+
     float pilot_phase(const std::array<std::complex<float>, FFT_SIZE> &symbol,
                       const std::array<std::complex<float>, FFT_SIZE> &channel) const
     {
@@ -889,7 +1051,10 @@ private:
         float power = 0;
         for (int subcarrier : data_bins_) {
             int bin = bin_index(subcarrier);
-            std::complex<float> value = symbol[bin] / channel[bin] * rotation;
+            float channel_power = magnitude_squared(channel[bin]);
+            std::complex<float> value{};
+            if (channel_power > 1.0e-12f)
+                value = symbol[bin] * std::conj(channel[bin]) / channel_power * rotation;
             values.push_back(value);
             power += magnitude_squared(value);
         }
@@ -980,14 +1145,16 @@ private:
     }
 
     void print_frame(const std::vector<uint8_t> &frame, const Rate &rate,
-                     size_t sample_index, float omega)
+                     size_t sample_index, float omega, float ltf_score,
+                     const SignalMetrics &metrics)
     {
         FrameInfo info = parse_frame(frame);
-        double time = static_cast<double>(sample_index * 2) / INPUT_RATE;
+        uint64_t input_sample = input_base_ + sample_index * input_decimation_;
+        double time = static_cast<double>(input_sample) / input_rate_;
         double cfo = omega * WIFI_RATE / (2.0 * PI);
         std::ostream &output = csi_ && csi_->uses_stdout() ? std::cerr : std::cout;
         output << std::fixed << std::setprecision(6)
-               << "frame time=" << time << "s sample=" << sample_index * 2;
+               << "frame time=" << time << "s sample=" << input_sample;
         if (center_frequency_)
             output << " center=" << center_frequency_ << "Hz";
         output << " rate=" << rate.mbps << "Mbps length=" << frame.size()
@@ -998,7 +1165,11 @@ private:
             output << " src=" << info.source;
         if (!info.bssid.empty())
             output << " bssid=" << info.bssid;
-        output << " cfo=" << std::setprecision(1) << cfo << "Hz fcs=ok\n";
+        output << " cfo=" << std::setprecision(1) << cfo << "Hz"
+               << " rssi=" << metrics.rssi_dbfs << "dBFS"
+               << " snr=" << metrics.snr_db << "dB"
+               << " ltf=" << std::setprecision(3) << ltf_score
+               << " fcs=ok\n";
         if (info.type == 0 && (info.subtype == 8 || info.subtype == 5)) {
             output << (info.subtype == 8 ? "beacon" : "probe-response")
                    << " bssid=" << info.bssid << " ssid="
@@ -1024,15 +1195,31 @@ private:
         float coarse_omega = std::arg(correlation) / static_cast<float>(DETECT_DELAY);
         size_t search_begin = run_start + 60;
         size_t search_end = std::min(samples_.size() - 128, run_start + 300);
-        size_t ltf_start = 0;
+        struct CoarseCandidate { float score = 0; size_t start = 0; };
+        std::array<CoarseCandidate, 2> coarse{};
+        for (size_t start = search_begin; start <= search_end; start += 2) {
+            CoarseCandidate candidate{ltf_correlation(start, run_start, coarse_omega), start};
+            auto position = std::min_element(coarse.begin(), coarse.end(),
+                [](const CoarseCandidate &a, const CoarseCandidate &b) {
+                    return a.score < b.score;
+                });
+            if (candidate.score > position->score)
+                *position = candidate;
+        }
+        size_t ltf_start = search_begin;
         float best_score = 0;
-        for (size_t start = search_begin; start <= search_end; ++start) {
-            float first = ltf_correlation(start, run_start, coarse_omega);
-            float second = ltf_correlation(start + 64, run_start, coarse_omega);
-            float score = std::min(first, second);
-            if (score > best_score) {
-                best_score = score;
-                ltf_start = start;
+        for (const CoarseCandidate &candidate : coarse) {
+            size_t refine_begin = candidate.start > 3 ? candidate.start - 3 : search_begin;
+            size_t refine_end = std::min(search_end, candidate.start + 3);
+            for (size_t start = std::max(search_begin, refine_begin);
+                 start <= refine_end; ++start) {
+                float first = ltf_correlation(start, run_start, coarse_omega);
+                float second = ltf_correlation(start + 64, run_start, coarse_omega);
+                float score = std::min(first, second);
+                if (score > best_score) {
+                    best_score = score;
+                    ltf_start = start;
+                }
             }
         }
         if (best_score < LTF_THRESHOLD) {
@@ -1047,6 +1234,7 @@ private:
         auto first = symbol_fft(ltf_start, ltf_start, omega);
         auto second = symbol_fft(ltf_start + 64, ltf_start, omega);
         auto channel = estimate_channel(first, second);
+        SignalMetrics signal_metrics = measure_signal(ltf_start, first, second);
         size_t length = 0;
         float phase = 0;
         const Rate *rate = decode_signal(ltf_start + 144, channel, ltf_start, omega, length, phase);
@@ -1075,7 +1263,8 @@ private:
         }
         size_t decoded_bits = symbols * rate->data_bits_per_symbol;
         auto full_rate = depuncture(coded, decoded_bits, rate->puncture);
-        ViterbiResult decoded = viterbi(full_rate);
+        /* Scrambled pad bits follow the zero tail and can leave a nonzero final state. */
+        ViterbiResult decoded = viterbi(full_rate, false);
         auto plain = descramble(decoded.bits);
         if (plain.size() < 16 + 8 * length) {
             ++data_rejections_;
@@ -1094,10 +1283,12 @@ private:
             frame_info = parse_frame(frame);
         if (csi_ && csi_->enabled() && (fcs_valid || csi_->include_invalid())) {
             CsiRecord record;
-            record.input_sample = (stream_base_ + ltf_start) * 2;
+            record.input_sample = input_base_
+                + (stream_base_ + ltf_start) * input_decimation_;
             record.center_frequency = center_frequency_;
             record.cfo_hz = omega * static_cast<float>(WIFI_RATE / (2.0 * PI));
             record.ltf_correlation = best_score;
+            record.snr_db = signal_metrics.snr_db;
             record.rate_mbps = rate->mbps;
             record.psdu_length = static_cast<unsigned>(length);
             record.fcs_valid = fcs_valid;
@@ -1109,12 +1300,13 @@ private:
         }
         if (fcs_valid) {
             ++frames_;
-            print_frame(frame, *rate, stream_base_ + ltf_start, omega);
+            print_frame(frame, *rate, stream_base_ + ltf_start, omega, best_score,
+                        signal_metrics);
         } else {
             ++fcs_failures_;
             if (verbose_)
                 std::cerr << "Rejected PSDU at input sample "
-                          << (stream_base_ + ltf_start) * 2
+                          << input_base_ + (stream_base_ + ltf_start) * input_decimation_
                           << ": FCS mismatch, rate=" << rate->mbps
                           << " Mbps, length=" << length << '\n';
         }
@@ -1145,7 +1337,7 @@ private:
                 detect_count_ = 0;
                 rolling_valid_ = false;
                 if (result == DecodeResult::Rejected)
-                    scan_cursor_ = candidate_start_ + 16;
+                    scan_cursor_ = candidate_start_ + 160;
             }
             if (scan_cursor_ + DETECT_WINDOW + DETECT_DELAY >= samples_.size())
                 break;
@@ -1159,6 +1351,7 @@ private:
                     candidate_correlation_ = rolling_correlation_;
                 }
                 if (detect_count_ == DETECT_RUN) {
+                    ++preamble_candidates_;
                     pending_candidate_ = true;
                     continue;
                 }
@@ -1184,12 +1377,17 @@ private:
     }
 
     uint64_t center_frequency_;
+    uint32_t input_rate_;
+    size_t input_decimation_;
+    uint64_t input_base_;
+    std::complex<float> oscillator_{1.0f, 0.0f};
+    std::complex<float> oscillator_step_{1.0f, 0.0f};
     bool verbose_;
     CsiWriter *csi_;
     std::vector<int> data_bins_;
     std::vector<std::complex<float>> samples_;
     std::complex<float> pending_{};
-    bool have_pending_ = false;
+    size_t pending_count_ = 0;
     std::array<uint8_t, 4> byte_buffer_{};
     size_t byte_count_ = 0;
     bool have_byte_ = false;
@@ -1206,10 +1404,198 @@ private:
     uint64_t frames_ = 0;
     uint64_t bad_datagrams_ = 0;
     uint64_t signal_headers_ = 0;
+    uint64_t preamble_candidates_ = 0;
     uint64_t ltf_rejections_ = 0;
     uint64_t signal_rejections_ = 0;
     uint64_t data_rejections_ = 0;
     uint64_t fcs_failures_ = 0;
+};
+
+class NativeWifiContext {
+public:
+    NativeWifiContext(const Options &options, CsiWriter *csi)
+        : options_(options), csi_(csi), settle_samples_(options.sample_rate / 10),
+          software_dwell_samples_(static_cast<uint64_t>(options.sample_rate)
+                                  * options.dwell_ms / 1000),
+          worker_(&NativeWifiContext::worker_loop, this)
+    {
+    }
+
+    static void samples(const int16_t *iq, uint32_t count, uint64_t first_sample,
+                        uint64_t frequency, uint64_t epoch, void *context)
+    {
+        static_cast<NativeWifiContext *>(context)->enqueue(
+            iq, count, first_sample, frequency, epoch);
+    }
+
+    static void gap(const birriasdr_recovery_event *event, uint64_t frequency,
+                    uint64_t epoch, void *context)
+    {
+        (void)context;
+        std::cerr << "Native stream gap before sample " << event->next_sample
+                  << ", epoch " << epoch << ", center " << frequency
+                  << " Hz, attempt " << event->attempt << ": "
+                  << birriasdr_strerror(event->error) << '\n';
+    }
+
+    bool dropped() const { return dropped_samples_ != 0; }
+
+    DecoderStats finish()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_all();
+        if (worker_.joinable())
+            worker_.join();
+        if (decoder_)
+            totals_ += decoder_->stats();
+        decoder_.reset();
+        if (dropped_samples_)
+            std::cerr << "Native decoder queue dropped " << dropped_samples_
+                      << " samples.\n";
+        return totals_;
+    }
+
+private:
+    struct Chunk {
+        std::vector<int16_t> iq;
+        uint32_t count = 0;
+        uint64_t first_sample = 0;
+        uint64_t frequency = 0;
+        uint64_t epoch = 0;
+        bool discontinuity = false;
+    };
+
+    void enqueue(const int16_t *iq, uint32_t count, uint64_t first_sample,
+                 uint64_t frequency, uint64_t epoch)
+    {
+        Chunk chunk;
+        chunk.iq.assign(iq, iq + static_cast<size_t>(count) * 2);
+        chunk.count = count;
+        chunk.first_sample = first_sample;
+        chunk.frequency = frequency;
+        chunk.epoch = epoch;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (queue_.size() >= 256) {
+                for (const Chunk &queued : queue_)
+                    dropped_samples_ += queued.count;
+                queue_.clear();
+                chunk.discontinuity = true;
+            }
+            queue_.push_back(std::move(chunk));
+        }
+        condition_.notify_one();
+    }
+
+    void worker_loop()
+    {
+        for (;;) {
+            Chunk chunk;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+                if (queue_.empty()) {
+                    if (stopping_)
+                        break;
+                    continue;
+                }
+                if (!stopping_ && queue_.size() < 8)
+                    condition_.wait_for(lock, std::chrono::milliseconds(2));
+                chunk = std::move(queue_.front());
+                queue_.pop_front();
+                chunk.iq.reserve(131072 * 2);
+                while (!queue_.empty() && !queue_.front().discontinuity
+                       && queue_.front().epoch == chunk.epoch
+                       && queue_.front().frequency == chunk.frequency
+                       && chunk.count + queue_.front().count <= 131072) {
+                    Chunk next = std::move(queue_.front());
+                    queue_.pop_front();
+                    chunk.iq.insert(chunk.iq.end(), next.iq.begin(), next.iq.end());
+                    chunk.count += next.count;
+                }
+            }
+            if (chunk.discontinuity)
+                epoch_ = std::numeric_limits<uint64_t>::max();
+            feed(chunk.iq.data(), chunk.count, chunk.first_sample,
+                 chunk.frequency, chunk.epoch);
+        }
+    }
+
+    std::unique_ptr<Decoder> make_decoder(uint64_t input_frequency,
+                                          uint64_t input_base)
+    {
+        uint64_t decode_frequency = input_frequency;
+        if (options_.sweep && options_.sample_rate >= 80000000u)
+            decode_frequency = UINT64_C(2412000000)
+                + UINT64_C(5000000) * (software_channel_ - 1);
+        return std::make_unique<Decoder>(decode_frequency, input_frequency,
+            options_.sample_rate, input_base, options_.verbose, csi_);
+    }
+
+    void feed(const int16_t *iq, uint32_t count, uint64_t first_sample,
+              uint64_t frequency, uint64_t epoch)
+    {
+        if (!decoder_) {
+            decoder_ = make_decoder(frequency, first_sample);
+            epoch_ = epoch;
+        } else if (epoch != epoch_) {
+            totals_ += decoder_->stats();
+            decoder_.reset();
+            epoch_ = epoch;
+            pending_frequency_ = frequency;
+            discard_remaining_ = settle_samples_;
+        }
+        uint32_t skip = static_cast<uint32_t>(std::min<uint64_t>(count, discard_remaining_));
+        discard_remaining_ -= skip;
+        iq += static_cast<size_t>(skip) * 2;
+        count -= skip;
+        first_sample += skip;
+        if (!count)
+            return;
+        if (!decoder_)
+            decoder_ = make_decoder(pending_frequency_, first_sample);
+        if (!options_.sweep || options_.sample_rate < 80000000u) {
+            decoder_->feed_iq(iq, count);
+            return;
+        }
+        uint32_t done = 0;
+        while (done < count) {
+            uint64_t remaining = software_dwell_samples_ - software_samples_;
+            uint32_t take = static_cast<uint32_t>(std::min<uint64_t>(count - done, remaining));
+            decoder_->feed_iq(iq + static_cast<size_t>(done) * 2, take);
+            done += take;
+            software_samples_ += take;
+            if (software_samples_ == software_dwell_samples_) {
+                totals_ += decoder_->stats();
+                decoder_.reset();
+                software_samples_ = 0;
+                software_channel_ = software_channel_ == 13 ? 1 : software_channel_ + 1;
+                if (done < count)
+                    decoder_ = make_decoder(frequency, first_sample + done);
+            }
+        }
+    }
+
+    const Options &options_;
+    CsiWriter *csi_;
+    uint64_t settle_samples_;
+    uint64_t software_dwell_samples_;
+    uint64_t software_samples_ = 0;
+    unsigned software_channel_ = 1;
+    uint64_t discard_remaining_ = 0;
+    uint64_t pending_frequency_ = 0;
+    uint64_t epoch_ = std::numeric_limits<uint64_t>::max();
+    std::unique_ptr<Decoder> decoder_;
+    DecoderStats totals_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<Chunk> queue_;
+    bool stopping_ = false;
+    uint64_t dropped_samples_ = 0;
+    std::thread worker_;
 };
 
 int open_udp_receiver(const Options &options)
@@ -1269,6 +1655,24 @@ bool coding_self_test()
     auto decoded = viterbi(encoded);
     if (decoded.bits != source) {
         std::cerr << "self-test: Viterbi mismatch\n";
+        return false;
+    }
+    std::vector<uint8_t> padded_source(240);
+    for (size_t i = 0; i < padded_source.size(); ++i)
+        padded_source[i] = static_cast<uint8_t>((i * 17 + i / 5) & 1);
+    for (size_t i = 200; i < 206; ++i)
+        padded_source[i] = 0;
+    encoded.clear();
+    state = 0;
+    for (uint8_t bit : padded_source) {
+        unsigned reg = (static_cast<unsigned>(bit) << 6) | state;
+        encoded.push_back(parity(reg & 0133u) ? -1.0f : 1.0f);
+        encoded.push_back(parity(reg & 0171u) ? -1.0f : 1.0f);
+        state = reg >> 1;
+    }
+    decoded = viterbi(encoded, false);
+    if (decoded.bits != padded_source) {
+        std::cerr << "self-test: Viterbi best-final-state mismatch\n";
         return false;
     }
     static const uint8_t check[] = "123456789";
@@ -1343,6 +1747,7 @@ bool csi_self_test()
     record.center_frequency = UINT64_C(2437000000);
     record.cfo_hz = -1234.5f;
     record.ltf_correlation = 0.75f;
+    record.snr_db = 18.25f;
     record.rate_mbps = 24;
     record.psdu_length = 128;
     record.fcs_valid = true;
@@ -1384,49 +1789,121 @@ int main(int argc, char **argv)
     CsiWriter csi;
     if (!csi.open(options))
         return 1;
-    Decoder decoder(options.center_frequency, options.verbose, &csi);
     ::signal(SIGINT, handle_signal);
     ::signal(SIGTERM, handle_signal);
+
+    DecoderStats totals;
+    bool input_failed = false;
     std::array<uint8_t, 65536> buffer{};
     if (!options.file.empty()) {
+        Decoder decoder(options.center_frequency, options.center_frequency,
+                        options.sample_rate, 0, options.verbose, &csi);
         FILE *file = std::fopen(options.file.c_str(), "rb");
         if (!file) {
             std::perror("Input file");
             return 1;
         }
+        std::cerr << "Reading " << options.sample_rate
+                  << " S/s little-endian CS16 from " << options.file << ".\n";
         while (!interrupted) {
             size_t count = std::fread(buffer.data(), 1, buffer.size(), file);
             if (count)
                 decoder.feed_cs16_stream(buffer.data(), count);
             if (count < buffer.size()) {
-                if (std::ferror(file))
+                if (std::ferror(file)) {
                     std::perror("Input file");
+                    input_failed = true;
+                }
                 break;
             }
         }
-        std::fclose(file);
-    } else {
+        if (std::fclose(file)) {
+            std::perror("Input file close");
+            input_failed = true;
+        }
+        if (decoder.trailing_bytes()) {
+            std::cerr << "Input file ends with " << decoder.trailing_bytes()
+                      << " incomplete CS16 byte(s).\n";
+            input_failed = true;
+        }
+        totals = decoder.stats();
+    } else if (options.udp) {
+        Decoder decoder(options.center_frequency, options.center_frequency,
+                        options.sample_rate, 0, options.verbose, &csi);
         int fd = open_udp_receiver(options);
         if (fd < 0)
             return 1;
-        std::cerr << "Listening for 40 MSps little-endian CS16 on " << options.bind
-                  << ':' << options.port << ". Legacy 20 MHz OFDM only.\n";
+        std::cerr << "Listening for " << options.sample_rate
+                  << " S/s little-endian CS16 on " << options.bind << ':' << options.port
+                  << ". Legacy 20 MHz OFDM only.\n";
         while (!interrupted) {
             ssize_t count = recv(fd, buffer.data(), buffer.size(), 0);
             if (count > 0)
                 decoder.feed_cs16(buffer.data(), static_cast<size_t>(count));
             else if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
                 std::perror("UDP receive");
+                input_failed = true;
                 break;
             }
         }
         close(fd);
+        totals = decoder.stats();
+    } else {
+        birria_native::print_rate_warning(options.sample_rate);
+        std::vector<uint64_t> frequencies;
+        if (options.sweep && options.sample_rate == 40000000u) {
+            for (unsigned channel = 1; channel <= 13; ++channel)
+                frequencies.push_back(UINT64_C(2412000000) + UINT64_C(5000000) * (channel - 1));
+        } else if (options.sweep) {
+            frequencies.push_back(UINT64_C(2442000000));
+        } else {
+            frequencies.push_back(options.frequency_set
+                ? options.center_frequency : DEFAULT_NATIVE_FREQUENCY);
+        }
+        std::cerr << "Opening native USB device " << options.device_index
+                  << " at " << options.sample_rate << " S/s";
+        if (options.sweep && options.sample_rate == 40000000u)
+            std::cerr << ", RF-sweeping Wi-Fi channels 1 through 13 every "
+                      << options.dwell_ms << " ms";
+        else if (options.sweep)
+            std::cerr << ", software-sweeping Wi-Fi channels 1 through 13 in one "
+                      << "wide capture every " << options.dwell_ms << " ms";
+        else
+            std::cerr << ", center " << frequencies.front() << " Hz";
+        std::cerr << ".\n";
+        NativeWifiContext context(options, &csi);
+        birria_native::Options native_options;
+        native_options.device_index = options.device_index;
+        native_options.sample_rate = options.sample_rate;
+        native_options.recovery_restarts = options.recovery_restarts;
+        native_options.manual_gain = options.manual_gain;
+        birria_native::Callbacks callbacks;
+        callbacks.samples = NativeWifiContext::samples;
+        callbacks.gap = NativeWifiContext::gap;
+        callbacks.context = &context;
+        birria_native::Session session(native_options, frequencies, options.dwell_ms,
+                                       interrupted, callbacks);
+        birria_native::Result result = session.run();
+        totals = context.finish();
+        bool decoder_dropped = context.dropped();
+        std::cerr << "Native stream=" << birriasdr_strerror(result.stream_error)
+                  << ", control=" << birriasdr_strerror(result.control_error)
+                  << ", epochs=" << result.epochs
+                  << ", firmware state=" << result.stats.firmware_state
+                  << ", stage=" << result.stats.stage
+                  << ", reset=" << birriasdr_strerror(result.stats.reset_error) << '\n';
+        input_failed = result.stream_error || result.control_error || result.close_error
+            || decoder_dropped;
     }
-    std::cerr << "Input samples=" << decoder.input_samples()
-              << ", SIGNAL headers=" << decoder.signal_headers()
-              << ", valid frames=" << decoder.frames()
-              << ", FCS failures=" << decoder.fcs_failures()
-              << ", malformed datagrams=" << decoder.bad_datagrams()
+    std::cerr << "Input samples=" << totals.input_samples
+              << ", preamble candidates=" << totals.preamble_candidates
+              << ", LTF rejections=" << totals.ltf_rejections
+              << ", SIGNAL rejections=" << totals.signal_rejections
+              << ", SIGNAL headers=" << totals.signal_headers
+              << ", data rejections=" << totals.data_rejections
+              << ", valid frames=" << totals.frames
+              << ", FCS failures=" << totals.fcs_failures
+              << ", malformed datagrams=" << totals.bad_datagrams
               << ", CSI records=" << csi.records() << '\n';
-    return csi.failed() ? 1 : 0;
+    return input_failed || csi.failed() ? 1 : 0;
 }

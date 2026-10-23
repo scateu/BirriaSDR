@@ -3,7 +3,7 @@
  */
 
 /*
- * MT7961/MT7972 matched receive bandwidth at 40 MSps
+ * MT7961/MT7972 matched receive bandwidth profiles
  *
  * The analog filter and the digital PHY bandwidth are independent controls.
  * RF 0x160[31:30] selects the analog profile in each physical SPI bank;
@@ -12,12 +12,13 @@
  * analog filter retains the digital rolloff: noise is about 22 dB down at
  * +/-18 MHz with analog code 1 and digital code 0.
  *
- * Set both fields to code 1 after the established RF/gain bootstrap, while
- * capture is stopped and the original MCU program waits for GO. This is the
- * matched 40 MHz profile. The capture tap and divider remain unchanged at
- * nominal 40 MSps complex; no host equalizer, averaging or format conversion
- * is introduced. The paired configuration reduced the measured noise rolloff
- * to about 2.8 dB at +/-18 MHz on the tested board.
+ * Set both fields to code 1, 2 or 3 after the established RF/gain bootstrap,
+ * while capture is stopped and the original MCU program waits for GO. These
+ * profiles pair with 40, 80 and 160 MSps. No host equalizer, averaging or
+ * format conversion is introduced. The 40 MHz paired configuration reduced
+ * the measured noise rolloff to about 2.8 dB at +/-18 MHz on the tested board.
+ * The 80 MHz profile is experimentally validated by packet decoding, while
+ * the 160 MHz CS16 stream exceeds the current USB transport.
  *
  * This is a nominal channel profile, not a brick-wall anti-alias filter. The
  * receive-only Wi-Fi comparison measured roughly 19-20 dB suppression at
@@ -86,7 +87,7 @@ int mt_restore_filter(birriasdr_dev_t *dev)
 int mt_configure_filter(birriasdr_dev_t *dev)
 {
     uint32_t before[4];
-    if (dev->rate != 40000000)
+    if (!mt_sample_rate_supported(dev->rate))
         return BIRRIASDR_ERROR_UNSUPPORTED;
     if (dev->mt7921.filter_saved)
         return BIRRIASDR_ERROR_STATE;
@@ -94,8 +95,10 @@ int mt_configure_filter(birriasdr_dev_t *dev)
         BS_TRY(filter_read(dev, i, &before[i]));
     memcpy(dev->mt7921.filter_baseline, before, sizeof(before));
     dev->mt7921.filter_saved = true;
+    uint32_t profile = mt_sample_rate_profile(dev->rate);
     for (unsigned i = 0; i < 4; ++i) {
-        int result = filter_write(dev, i, i < 2 ? UINT32_C(0x40000000) : UINT32_C(0x01000000));
+        uint32_t value = i < 2 ? profile << 30 : profile << 24;
+        int result = filter_write(dev, i, value);
         if (result < 0)
             return mt_restore_filter(dev) < 0 ? BIRRIASDR_ERROR_STATE : result;
     }

@@ -1,7 +1,7 @@
 # BirriaSDR
 
 Turn a supported USB Wi-Fi dongle into an experimental SDR receiver with
-**14-bit I/Q at 40 MSps complex**.
+**14-bit I/Q at 40 MSps by default and an experimental 80 MSps mode**.
 
 BirriaSDR ships as `libbirriasdr`, a C11 library with an API modeled on
 librtlsdr, together with a command-line recorder. It talks to the device from
@@ -53,12 +53,11 @@ The tested hardware is the **COMFAST MT7961/MT7921AU dongle (`3574:6211`)**,
 which pairs an MT7961 digital die with an MT7972 analog die. By default the
 receiver is centered on Wi-Fi channel 6 (nominally 2437 MHz) and uses receive
 chain 0 at 40 million complex samples per second. The library can retune
-anywhere in the 2156 to 2610 MHz range, even while streaming. At 40 MSps it
-pairs the **40 MHz analog filter with the matching digital bandwidth setting**.
-On the tested board, the measured noise spectrum falls about 3 dB at ±18 MHz.
-The filters do not fully reject signals outside the sampled span, so strong
-signals there can alias into the capture. Treat this as measured behavior
-rather than a calibrated, flat bandwidth guarantee.
+anywhere in the 2156 to 2610 MHz range, even while streaming. The experimental
+80 MSps mode pairs capture-divider code 2 with analog and digital profile 2.
+It sustained native capture and decoded wide-band packets on the connected
+board on October 23, 2026. The optional 160 MSps CS16 mode is expected to
+overrun USB. None of the profiles is a calibrated, flat bandwidth guarantee.
 
 For more detail, see:
 
@@ -73,8 +72,8 @@ For more detail, see:
 | Hardware | COMFAST dongle `3574:6211`, or a board with MediaTek's generic ID `0e8d:7961`, with an MT7961 digital die and an MT7972 analog die |
 | Frequency tuning | 2156 to 2610 MHz, or 2190 to 2610 MHz on generic-ID boards, including live changes. Sensitivity across the range is unverified. No 5 GHz support yet |
 | Tuning step | Nominally 28.61 Hz, using the full 20-bit fraction. Requests are in whole hertz with no Wi-Fi channel restriction. The physical response to fine steps is still unmeasured |
-| Sample rate | 40 MSps complex, fixed |
-| Sampled bandwidth | 40 MHz span with matching nominal 40 MHz analog and digital settings. See [filter characteristics](docs/mt7921.md#filtering) for rolloff and aliasing limits |
+| Sample rate | 40 MSps complex by default. The 80 MSps mode is experimental. The 160 MSps CS16 mode is exposed for research but is expected to overrun the current USB exporter |
+| Sampled bandwidth | A matched nominal span for each native rate. The 40 MHz profile is qualified, the 80 MHz profile is experimental and the 160 MHz path is transport-limited. See [filter characteristics](docs/mt7921.md#filtering) |
 | Sample resolution | Signed 14-bit I and Q, from −8192 to 8191 |
 | Receive channels | One (chain 0) |
 | Transmit | None, receive only |
@@ -83,7 +82,7 @@ For more detail, see:
 | Automatic gain | Manual overrides can be released. Full AGC control is not implemented |
 | Frequency accuracy | Uncalibrated, with no ppm correction |
 | Reference clock | On-board 40 MHz crystal |
-| Host interface | Bulk transfers over USB 3.0 at about 161 MB/s |
+| Host interface | Bulk transfers over USB 3.0 at about 161 MB/s for 40 MSps and 322 MB/s for 80 MSps, including event overhead |
 | Output format | Interleaved signed 16-bit I and Q (`cs16`). Buffers from the API are native-endian, and recorder files are little-endian |
 | Firmware | Original 1,632-byte RAM program. No vendor firmware and nothing flashed |
 | Host platforms | Linux, tested on a Raspberry Pi 5, and macOS, tested on an Apple Silicon Mac |
@@ -172,6 +171,12 @@ cannot detect a datagram dropped after the local kernel accepts it. The SDR++
 Network source also cannot tune the receiver, so set the center frequency on
 the `birria_udp` command line. The [complete UDP streaming guide](examples/README.md)
 covers every option, stream format details, frequency control and troubleshooting.
+
+The protocol decoders open native USB capture by default. They can also consume
+the same UDP stream or a recorder file. The [Wi-Fi decoder guide](examples/README_wifi.md)
+covers legacy OFDM frames, native sweep mode and CSI. The
+[Bluetooth LE scanner guide](examples/README_ble.md) covers advertising-channel
+sweeps, decoded advertising data and Apple Find My candidates.
 
 Before you start, the dongle must have **no vendor ROM patch loaded**, and its
 Wi-Fi interface must be free for libusb to claim. A software reset does not

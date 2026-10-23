@@ -38,6 +38,16 @@
 #define MT_RF_MAX_HZ UINT64_C(2610000000)
 #define MT_RF_FRACTION_BITS 20u
 
+static inline bool mt_sample_rate_supported(uint32_t rate)
+{
+    return rate == 40000000u || rate == 80000000u || rate == 160000000u;
+}
+
+static inline unsigned mt_sample_rate_profile(uint32_t rate)
+{
+    return rate == 40000000u ? 1u : rate == 80000000u ? 2u : 3u;
+}
+
 /* A mathematical frequency plan, not a claim of analog tuning coverage.
  * nominal_hz_num / nominal_hz_den is exact for the assumed 60 MHz reference.
  */

@@ -197,9 +197,12 @@ int birriasdr_set_center_freq(birriasdr_dev_t *dev, uint64_t frequency_hz);
  */
 uint64_t birriasdr_get_center_freq(const birriasdr_dev_t *dev);
 
-/** Stage complex samples/second. MT7921 accepts 40000000 only at present.
- * The sampled span is 40 MHz, using matched nominal 40 MHz analog/digital
- * settings. This is not a calibrated passband or an alias-rejection guarantee.
+/** Stage native complex samples/second. MT7921 accepts 40000000, 80000000 and
+ * 160000000. The 40 MSps mode is the default. The 80 MSps mode is experimental
+ * but sustained on the qualified board. The 160 MSps CS16 mode is expected to
+ * overrun the current USB exporter and is exposed only for controlled research.
+ * Each rate selects its matched nominal analog/digital profile. These are not
+ * calibrated passbands or alias-rejection guarantees.
  */
 int birriasdr_set_sample_rate(birriasdr_dev_t *dev, uint32_t samples_per_second);
 
@@ -246,8 +249,9 @@ int birriasdr_get_tuner_gains(birriasdr_dev_t *dev, int *gains, size_t capacity)
 int birriasdr_set_agc_mode(birriasdr_dev_t *dev, int enabled);
 
 /** Reserved: independently selectable RF filter bandwidth in Hz. The backend
- * applies its fixed nominal 40 MHz profile automatically. This setter remains
- * UNSUPPORTED until additional widths and their RF response are qualified.
+ * automatically pairs each native sample rate with its nominal filter profile.
+ * This setter remains UNSUPPORTED because arbitrary independent widths are not
+ * qualified.
  */
 int birriasdr_set_tuner_bandwidth(birriasdr_dev_t *dev, uint32_t bandwidth_hz);
 
